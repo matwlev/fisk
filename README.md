@@ -39,6 +39,9 @@ Note: your data in `~/.fisk/` is preserved. Remove it manually if no longer need
 # Create a ledger
 fisk create checkbook --balance 4200.00
 
+# Create a ledger at a specific path
+fisk create savings --balance 10000.00 --path ~/finances/savings.csv
+
 # Add transactions
 fisk add checkbook --desc "Electric bill" --amount -142.50 --category Utilities
 fisk add checkbook --desc "Paycheck" --amount 3200.00 --category Income
@@ -84,7 +87,7 @@ fisk> quit
 
 | Command | Description |
 |---------|-------------|
-| `create <name> [--balance AMT]` | Create a new ledger |
+| `create <name> [--balance AMT] [--path PATH] [--config FILE]` | Create a new ledger |
 | `show` | List all ledgers |
 | `show <name> [--start-date] [--end-date] [--status] [--sort] [--limit] [--amount]` | Display a ledger |
 | `forecast <name> -d <date\|duration> [--sort] [--limit] [--amount]` | Show including future transactions |
