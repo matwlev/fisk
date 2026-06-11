@@ -119,11 +119,14 @@ Dates accept `YYYY-MM-DD`, `today`, or relative durations:
 
 ```bash
 fisk show checkbook --limit 10               # last 10 entries
+fisk show checkbook --limit 0                # show all (no limit)
 fisk show checkbook --amount ">=100"         # transactions $100+
 fisk show checkbook --amount "<50"           # under $50
 fisk show checkbook --status pending         # only pending
 fisk show checkbook --start-date 2026-05-01  # since a date
 ```
+
+By default, `show` displays the last 20 transactions. Use `--limit 0` to show all.
 
 Amount filtering compares against the absolute value (ignores sign).
 
