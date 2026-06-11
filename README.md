@@ -20,6 +20,11 @@ cd ~/projects/fisk
 
 Installs to `~/.local/bin/fisk`. Data is stored in `~/.fisk/`.
 
+```bash
+./install.sh --no-data               # skip creating data directory
+./install.sh --data-dir=~/Dropbox/finances  # custom data directory (sets FISK_DIR in shell rc)
+```
+
 ## Uninstall
 
 ```bash
