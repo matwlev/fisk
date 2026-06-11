@@ -92,7 +92,18 @@ fisk> quit
 | `clear <name> <id> [id...]` | Mark transactions as cleared |
 | `delete <name> <id> [id...]` | Delete transactions (with confirmation) |
 | `import <name> --file <path>` | Import from an external CSV |
+| `sort <name>` | Sort all transactions by date (reassigns IDs) |
+| `sort <name> <id> <position>` | Move a transaction to a position |
 | `use <name>` | Enter interactive mode for a ledger |
+| → `add` | Add a transaction |
+| → `bulk` | Add multiple transactions with the same date |
+| → `edit <id>` | Edit a transaction |
+| → `delete <id>` | Remove a transaction (with confirmation) |
+| → `clear <id>` | Mark as cleared |
+| → `details <id>` | Show full transaction details including notes |
+| → `sort` | Sort all transactions by date (reassigns IDs) |
+| → `sort <id> <pos>` | Move a transaction to a position (reassigns IDs) |
+| → `back` | Return to top-level |
 | `--version` | Show version |
 
 ## Date Formats
@@ -163,10 +174,10 @@ export FISK_DIR=~/Dropbox/finances
 The CSV format is simple and portable:
 
 ```csv
-id,date,description,amount,category,status
-1,2026-06-11,Opening balance,4200.00,,starting
-2,2026-06-11,Electric bill,-142.50,Utilities,cleared
-3,2026-06-11,Paycheck,3200.00,Income,pending
+id,date,description,amount,category,status,notes
+1,2026-06-11,Opening balance,4200.00,,starting,
+2,2026-06-11,Electric bill,-142.50,Utilities,cleared,
+3,2026-06-11,Paycheck,3200.00,Income,pending,Direct deposit
 ```
 
 ## License

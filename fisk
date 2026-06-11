@@ -15,7 +15,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 DEFAULT_DIR = Path.home() / ".fisk"
-FIELDNAMES = ["id", "date", "description", "amount", "category", "status"]
+FIELDNAMES = ["id", "date", "description", "amount", "category", "status", "notes"]
 
 
 def input_with_completion(prompt, options):
@@ -55,7 +55,11 @@ def read_ledger(name):
         print(f"Ledger '{name}' not found.")
         return None
     with open(path, newline="") as f:
-        return list(csv.DictReader(f))
+        rows = list(csv.DictReader(f))
+        for r in rows:
+            if "notes" not in r:
+                r["notes"] = ""
+        return rows
 
 
 def write_ledger(name, rows):
@@ -138,7 +142,8 @@ def format_table(rows, include_future=False, start_date=None, end_date=None, sta
         credit = f"{amt:.2f}" if amt > 0 else ""
         bal = balances.get(r["id"], Decimal("0"))
         st = {"cleared": "✓", "pending": "·", "future": "○", "starting": ""}.get(r["status"], "")
-        print(f"  {r['id']:>4}  {r['date']:<10}  {r['description']:<20}  {debit:>9}  {credit:>9}  {bal:>10.2f}  {st}")
+        desc = r["description"][:19] + "…" if len(r["description"]) > 20 else r["description"]
+        print(f"  {r['id']:>4}  {r['date']:<10}  {desc:<20}  {debit:>9}  {credit:>9}  {bal:>10.2f}  {st}")
 
 
 # --- Commands ---
@@ -156,6 +161,7 @@ def cmd_create(args):
         "amount": balance,
         "category": "",
         "status": "starting",
+        "notes": "",
     }]
     get_ledger_dir()
     write_ledger(name, rows)
@@ -204,6 +210,7 @@ def cmd_add_noninteractive(args):
         "amount": args.amount,
         "category": args.category or "",
         "status": status,
+        "notes": args.notes or "",
     })
     write_ledger(args.ledger, rows)
     print("Added.")
@@ -333,6 +340,7 @@ class FiskRepl(cmd.Cmd):
             "amount": balance,
             "category": "",
             "status": "starting",
+            "notes": "",
         }]
         write_ledger(name, rows)
         print(f"Created: {ledger_path(name)}")
@@ -402,6 +410,7 @@ class LedgerRepl(cmd.Cmd):
             desc = input_with_completion("  Description: ", descriptions).strip()
             amt = input("  Amount: ").strip()
             cat = input_with_completion("  Category []: ", categories).strip()
+            notes = input("  Notes []: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n  Cancelled.")
             return
@@ -418,6 +427,7 @@ class LedgerRepl(cmd.Cmd):
             "amount": amt,
             "category": cat,
             "status": status,
+            "notes": notes,
         })
         write_ledger(self.name, rows)
         print("  Added.")
@@ -449,6 +459,7 @@ class LedgerRepl(cmd.Cmd):
                 amt = input("  Amount: ").strip()
                 Decimal(amt)
                 cat = input_with_completion("  Category []: ", categories).strip()
+                notes = input("  Notes []: ").strip()
             except (EOFError, KeyboardInterrupt):
                 print("\n  Stopping.")
                 break
@@ -462,6 +473,7 @@ class LedgerRepl(cmd.Cmd):
                 "amount": amt,
                 "category": cat,
                 "status": status,
+                "notes": notes,
             })
             count += 1
             print("  ✓")
@@ -492,6 +504,8 @@ class LedgerRepl(cmd.Cmd):
                 Decimal(amt)
                 row["amount"] = amt
             row["category"] = input_with_completion(f"  Category [{row['category']}]: ", categories).strip() or row["category"]
+            current_notes = row.get("notes", "")
+            row["notes"] = input(f"  Notes [{current_notes}]: ").strip() or current_notes
         except (EOFError, KeyboardInterrupt):
             print("\n  Cancelled.")
             return
@@ -544,6 +558,85 @@ class LedgerRepl(cmd.Cmd):
                 r["status"] = "cleared"
         write_ledger(self.name, rows)
         print("  Cleared.")
+
+    def do_details(self, line):
+        """details <id> - show full details of a transaction"""
+        tid = line.strip()
+        if not tid:
+            print("Usage: details <id>")
+            return
+        rows = read_ledger(self.name)
+        if rows is None:
+            return
+        row = next((r for r in rows if r["id"] == tid), None)
+        if not row:
+            print(f"  Transaction {tid} not found.")
+            return
+        amt = Decimal(row["amount"])
+        print(f"  ID:          {row['id']}")
+        print(f"  Date:        {row['date']}")
+        print(f"  Description: {row['description']}")
+        print(f"  Amount:      {amt:.2f}")
+        print(f"  Category:    {row['category'] or '—'}")
+        print(f"  Status:      {row['status']}")
+        print(f"  Notes:       {row.get('notes', '') or '—'}")
+
+    def do_sort(self, line):
+        """sort - sort all by date; sort <id> <position> - move a transaction to a position"""
+        rows = read_ledger(self.name)
+        if rows is None:
+            return
+        parts = line.split()
+
+        if len(parts) == 2:
+            # Move a single transaction to a new position
+            src_id, dest_pos = parts[0], parts[1]
+            try:
+                dest_pos = int(dest_pos)
+            except ValueError:
+                print("  Usage: sort <id> <position>")
+                return
+            row = next((r for r in rows if r["id"] == src_id), None)
+            if not row:
+                print(f"  Transaction {src_id} not found.")
+                return
+            rows.remove(row)
+            idx = max(0, min(dest_pos - 1, len(rows)))
+            rows.insert(idx, row)
+            for i, r in enumerate(rows, 1):
+                r["id"] = str(i)
+            write_ledger(self.name, rows)
+            print(f"  Moved to #{dest_pos}. IDs reassigned.")
+            return
+
+        if parts:
+            print("  Usage: sort (sort all by date) or sort <id> <position>")
+            return
+
+        # Full sort by date
+        print("  Current order:")
+        for r in rows:
+            amt = Decimal(r["amount"])
+            sign = f"-{abs(amt):.2f}" if amt < 0 else f"{amt:.2f}"
+            print(f"    #{r['id']}  {r['date']}  {r['description']}  {sign}")
+        sorted_rows = sorted(rows, key=lambda x: (x["date"], int(x["id"])))
+        print("\n  Sorted order:")
+        for i, r in enumerate(sorted_rows, 1):
+            amt = Decimal(r["amount"])
+            sign = f"-{abs(amt):.2f}" if amt < 0 else f"{amt:.2f}"
+            print(f"    #{i}  {r['date']}  {r['description']}  {sign}")
+        try:
+            confirm = input("\n  Apply this sort and reassign IDs? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
+            return
+        if confirm != "y":
+            print("  Cancelled.")
+            return
+        for i, r in enumerate(sorted_rows, 1):
+            r["id"] = str(i)
+        write_ledger(self.name, sorted_rows)
+        print("  Sorted.")
 
     def do_back(self, line):
         """Return to fisk prompt"""
@@ -658,11 +751,36 @@ def cmd_import(args):
                 "amount": str(amt),
                 "category": cat,
                 "status": status,
+                "notes": "",
             })
             count += 1
 
     write_ledger(name, rows)
     print(f"  Imported {count} transactions into '{name}'.")
+
+
+def cmd_sort_noninteractive(args):
+    rows = read_ledger(args.ledger)
+    if rows is None:
+        return
+    if args.id and args.position:
+        row = next((r for r in rows if r["id"] == args.id), None)
+        if not row:
+            print(f"Transaction {args.id} not found.")
+            return
+        rows.remove(row)
+        idx = max(0, min(args.position - 1, len(rows)))
+        rows.insert(idx, row)
+        for i, r in enumerate(rows, 1):
+            r["id"] = str(i)
+        write_ledger(args.ledger, rows)
+        print(f"Moved to #{args.position}. IDs reassigned.")
+    else:
+        sorted_rows = sorted(rows, key=lambda x: (x["date"], int(x["id"])))
+        for i, r in enumerate(sorted_rows, 1):
+            r["id"] = str(i)
+        write_ledger(args.ledger, sorted_rows)
+        print("Sorted by date. IDs reassigned.")
 
 
 # --- Main ---
@@ -698,6 +816,7 @@ def build_parser():
     p.add_argument("--desc", required=True, help="Description")
     p.add_argument("--amount", required=True, help="Amount (positive for credit, negative for debit)")
     p.add_argument("--category", default="", help="Category (optional)")
+    p.add_argument("--notes", default="", help="Notes (optional)")
 
     p = sub.add_parser("clear", help="Mark transactions as cleared")
     p.add_argument("ledger", help="Ledger name")
@@ -718,6 +837,11 @@ def build_parser():
     p.add_argument("--debit-col", help="Name of the debit column")
     p.add_argument("--category-col", help="Name of the category column")
     p.add_argument("--cleared-col", help="Name of the cleared/checkmark column")
+
+    p = sub.add_parser("sort", help="Sort transactions or move a transaction to a position")
+    p.add_argument("ledger", help="Ledger name")
+    p.add_argument("id", nargs="?", help="Transaction ID to move")
+    p.add_argument("position", nargs="?", type=int, help="Target position")
 
     return parser
 
@@ -744,6 +868,8 @@ def main():
         cmd_delete_noninteractive(args)
     elif args.command == "import":
         cmd_import(args)
+    elif args.command == "sort":
+        cmd_sort_noninteractive(args)
     else:
         parser.print_help()
 
