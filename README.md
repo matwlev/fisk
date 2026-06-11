@@ -100,6 +100,7 @@ fisk> quit
 | → `edit <id>` | Edit a transaction |
 | → `delete <id>` | Remove a transaction (with confirmation) |
 | → `clear <id>` | Mark as cleared |
+| → `reconcile` | Walk through unreconciled transactions, verify balance |
 | → `details <id>` | Show full transaction details including notes |
 | → `sort` | Sort all transactions by date (reassigns IDs) |
 | → `sort <id> <pos>` | Move a transaction to a position (reassigns IDs) |
@@ -136,12 +137,15 @@ fisk show checkbook --sort asc
 ## Transaction Status
 
 ```
-future → pending → cleared
+future → pending → cleared → reconciled
 ```
 
-- **future** — dated in the future, only visible in `forecast`
-- **pending** — entered but not yet confirmed at the bank
-- **cleared** — confirmed/posted
+- **future** `○` — dated in the future, only visible in `forecast`
+- **pending** `·` — entered but not yet confirmed at the bank
+- **cleared** `✓` — confirmed/posted at the bank
+- **reconciled** `◆` — verified against bank statement
+
+Transactions can go directly from pending to reconciled (skipping cleared).
 
 ## Importing
 

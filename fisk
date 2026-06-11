@@ -170,7 +170,7 @@ def format_table(rows, include_future=False, start_date=None, end_date=None, sta
         debit = f"{abs(amt):.2f}" if amt < 0 else ""
         credit = f"{amt:.2f}" if amt > 0 else ""
         bal = balances.get(r["id"], Decimal("0"))
-        st = {"cleared": "✓", "pending": "·", "future": "○", "starting": ""}.get(r["status"], "")
+        st = {"cleared": "✓", "pending": "·", "future": "○", "starting": "", "reconciled": "◆"}.get(r["status"], "")
         desc = r["description"][:19] + "…" if len(r["description"]) > 20 else r["description"]
         print(f"  {r['id']:>4}  {r['date']:<10}  {desc:<20}  {debit:>9}  {credit:>9}  {bal:>10.2f}  {st}")
 
@@ -633,6 +633,82 @@ class LedgerRepl(cmd.Cmd):
         print(f"  Category:    {row['category'] or '—'}")
         print(f"  Status:      {row['status']}")
         print(f"  Notes:       {row.get('notes', '') or '—'}")
+
+    def do_reconcile(self, line):
+        """reconcile - walk through unreconciled transactions and verify balance"""
+        rows = read_ledger(self.name)
+        if rows is None:
+            return
+        try:
+            stmt_balance = input("  Statement ending balance: ").strip()
+            stmt_balance = Decimal(stmt_balance)
+            stmt_date = input(f"  Statement date [{date.today().isoformat()}]: ").strip() or date.today().isoformat()
+            stmt_date = date.fromisoformat(stmt_date)
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
+            return
+        except (InvalidOperation, ValueError):
+            print("  Invalid input.")
+            return
+
+        # Find unreconciled transactions (pending or cleared) through statement date
+        eligible = [r for r in sorted(rows, key=lambda x: (x["date"], int(x["id"])))
+                    if r["status"] in ("pending", "cleared")
+                    and date.fromisoformat(r["date"]) <= stmt_date]
+
+        if not eligible:
+            print("  No unreconciled transactions found.")
+            return
+
+        print(f"\n  {len(eligible)} unreconciled transaction(s) through {stmt_date}:\n")
+        reconciled_ids = []
+        for r in eligible:
+            amt = Decimal(r["amount"])
+            sign = f"-{abs(amt):.2f}" if amt < 0 else f"{amt:.2f}"
+            try:
+                resp = input(f"  #{r['id']}  {r['date']}  {r['description']}  {sign}  [Y/n/s]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\n  Stopping.")
+                break
+            if resp in ("", "y"):
+                reconciled_ids.append(r["id"])
+            elif resp == "n":
+                print("    Flagged — skipping.")
+            # 's' or anything else = skip silently
+
+        # Compute reconciled balance
+        previously_reconciled = sum(
+            Decimal(r["amount"]) for r in rows if r["status"] == "reconciled"
+        )
+        newly_reconciled = sum(
+            Decimal(r["amount"]) for r in rows if r["id"] in set(reconciled_ids)
+        )
+        # Include starting balance
+        starting = sum(Decimal(r["amount"]) for r in rows if r["status"] == "starting")
+        computed_balance = starting + previously_reconciled + newly_reconciled
+
+        print(f"\n  Reconciled balance: {computed_balance:.2f}")
+        print(f"  Statement balance:  {stmt_balance:.2f}", end="")
+        if computed_balance == stmt_balance:
+            print("  ✓ Balanced!")
+        else:
+            diff = computed_balance - stmt_balance
+            print(f"  ✗ Difference: {diff:.2f}")
+            try:
+                proceed = input("  Balances don't match. Reconcile anyway? [y/N]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\n  Cancelled.")
+                return
+            if proceed != "y":
+                print("  Cancelled. No changes made.")
+                return
+
+        # Apply
+        for r in rows:
+            if r["id"] in set(reconciled_ids):
+                r["status"] = "reconciled"
+        write_ledger(self.name, rows)
+        print(f"  {len(reconciled_ids)} transaction(s) reconciled.")
 
     def do_sort(self, line):
         """sort - sort all by date; sort <id> <position> - move a transaction to a position"""
