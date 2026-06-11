@@ -104,6 +104,7 @@ fisk> quit
 | → `delete <id>` | Remove a transaction (with confirmation) |
 | → `clear <id>` | Mark as cleared |
 | → `reconcile` | Walk through unreconciled transactions, verify balance |
+| → `forecast [-d]` | Show including future transactions |
 | → `details <id>` | Show full transaction details including notes |
 | → `sort` | Sort all transactions by date (reassigns IDs) |
 | → `sort <id> <pos>` | Move a transaction to a position (reassigns IDs) |
