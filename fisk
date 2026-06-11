@@ -92,7 +92,20 @@ def parse_date_or_relative(val):
     return date.fromisoformat(val)
 
 
-def format_table(rows, include_future=False, start_date=None, end_date=None, status_filter=None, sort_order="desc"):
+def parse_amount_filter(val):
+    """Parse an amount filter like '>=100', '<50', '=25.00'."""
+    m = re.match(r"^(>=|<=|>|<|=)(.+)$", val)
+    if not m:
+        return None
+    op, amt = m.group(1), m.group(2)
+    try:
+        threshold = Decimal(amt)
+    except InvalidOperation:
+        return None
+    return (op, threshold)
+
+
+def format_table(rows, include_future=False, start_date=None, end_date=None, status_filter=None, sort_order="desc", limit=None, amount_filter=None):
     """Format rows into a table with debit/credit/balance columns."""
     filtered = []
     for r in sorted(rows, key=lambda x: (x["date"], int(x["id"]))):
@@ -106,6 +119,19 @@ def format_table(rows, include_future=False, start_date=None, end_date=None, sta
             continue
         if end_date and rd > end_date:
             continue
+        if amount_filter:
+            op, threshold = amount_filter
+            amt = abs(Decimal(r["amount"]))
+            if op == ">=" and not (amt >= threshold):
+                continue
+            elif op == "<=" and not (amt <= threshold):
+                continue
+            elif op == ">" and not (amt > threshold):
+                continue
+            elif op == "<" and not (amt < threshold):
+                continue
+            elif op == "=" and not (amt == threshold):
+                continue
         filtered.append(r)
 
     if not filtered:
@@ -132,6 +158,9 @@ def format_table(rows, include_future=False, start_date=None, end_date=None, sta
 
     if sort_order == "desc":
         filtered = list(reversed(filtered))
+
+    if limit:
+        filtered = filtered[:limit]
 
     hdr = f"  {'#':>4}  {'Date':<10}  {'Description':<20}  {'Debit':>9}  {'Credit':>9}  {'Balance':>10}  {'Status'}"
     print(hdr)
@@ -184,7 +213,9 @@ def cmd_show(args):
     end = parse_date_or_relative(args.end_date) if args.end_date else date.today()
     status_filter = args.status if hasattr(args, "status") and args.status else None
     sort_order = args.sort if hasattr(args, "sort") and args.sort else "desc"
-    format_table(rows, include_future=False, start_date=start, end_date=end, status_filter=status_filter, sort_order=sort_order)
+    limit = args.limit if hasattr(args, "limit") else None
+    amount_filter = parse_amount_filter(args.amount) if hasattr(args, "amount") and args.amount else None
+    format_table(rows, include_future=False, start_date=start, end_date=end, status_filter=status_filter, sort_order=sort_order, limit=limit, amount_filter=amount_filter)
 
 
 def cmd_forecast(args):
@@ -194,7 +225,9 @@ def cmd_forecast(args):
     end = parse_date_or_relative(args.d) if args.d else date.today() + timedelta(days=30)
     start = parse_date_or_relative(args.start_date) if args.start_date else None
     sort_order = args.sort if hasattr(args, "sort") and args.sort else "desc"
-    format_table(rows, include_future=True, start_date=start, end_date=end, sort_order=sort_order)
+    limit = args.limit if hasattr(args, "limit") else None
+    amount_filter = parse_amount_filter(args.amount) if hasattr(args, "amount") and args.amount else None
+    format_table(rows, include_future=True, start_date=start, end_date=end, sort_order=sort_order, limit=limit, amount_filter=amount_filter)
 
 
 def cmd_add_noninteractive(args):
@@ -271,7 +304,7 @@ class FiskRepl(cmd.Cmd):
         if rows is None:
             return
         # Parse inline flags
-        start, end, status, sort_order = None, date.today(), None, "desc"
+        start, end, status, sort_order, limit, amount_filter = None, date.today(), None, "desc", None, None
         i = 1
         while i < len(parts):
             if parts[i] == "--start-date" and i + 1 < len(parts):
@@ -286,9 +319,15 @@ class FiskRepl(cmd.Cmd):
             elif parts[i] == "--sort" and i + 1 < len(parts):
                 sort_order = parts[i + 1]
                 i += 2
+            elif parts[i] == "--limit" and i + 1 < len(parts):
+                limit = int(parts[i + 1])
+                i += 2
+            elif parts[i] == "--amount" and i + 1 < len(parts):
+                amount_filter = parse_amount_filter(parts[i + 1])
+                i += 2
             else:
                 i += 1
-        format_table(rows, include_future=False, start_date=start, end_date=end, status_filter=status, sort_order=sort_order)
+        format_table(rows, include_future=False, start_date=start, end_date=end, status_filter=status, sort_order=sort_order, limit=limit, amount_filter=amount_filter)
 
     def do_forecast(self, line):
         """forecast <ledger> [-d DATE|DURATION]"""
@@ -303,6 +342,8 @@ class FiskRepl(cmd.Cmd):
         end = date.today() + timedelta(days=30)
         start = None
         sort_order = "desc"
+        limit = None
+        amount_filter = None
         i = 1
         while i < len(parts):
             if parts[i] == "-d" and i + 1 < len(parts):
@@ -314,9 +355,15 @@ class FiskRepl(cmd.Cmd):
             elif parts[i] == "--sort" and i + 1 < len(parts):
                 sort_order = parts[i + 1]
                 i += 2
+            elif parts[i] == "--limit" and i + 1 < len(parts):
+                limit = int(parts[i + 1])
+                i += 2
+            elif parts[i] == "--amount" and i + 1 < len(parts):
+                amount_filter = parse_amount_filter(parts[i + 1])
+                i += 2
             else:
                 i += 1
-        format_table(rows, include_future=True, start_date=start, end_date=end, sort_order=sort_order)
+        format_table(rows, include_future=True, start_date=start, end_date=end, sort_order=sort_order, limit=limit, amount_filter=amount_filter)
 
     def do_create(self, line):
         """create <name> [--balance AMOUNT]"""
@@ -379,7 +426,7 @@ class LedgerRepl(cmd.Cmd):
         if rows is None:
             return
         parts = line.split()
-        start, end, status, sort_order = None, date.today(), None, "desc"
+        start, end, status, sort_order, limit, amount_filter = None, date.today(), None, "desc", None, None
         i = 0
         while i < len(parts):
             if parts[i] == "--start-date" and i + 1 < len(parts):
@@ -394,9 +441,15 @@ class LedgerRepl(cmd.Cmd):
             elif parts[i] == "--sort" and i + 1 < len(parts):
                 sort_order = parts[i + 1]
                 i += 2
+            elif parts[i] == "--limit" and i + 1 < len(parts):
+                limit = int(parts[i + 1])
+                i += 2
+            elif parts[i] == "--amount" and i + 1 < len(parts):
+                amount_filter = parse_amount_filter(parts[i + 1])
+                i += 2
             else:
                 i += 1
-        format_table(rows, include_future=False, start_date=start, end_date=end, status_filter=status, sort_order=sort_order)
+        format_table(rows, include_future=False, start_date=start, end_date=end, status_filter=status, sort_order=sort_order, limit=limit, amount_filter=amount_filter)
 
     def do_add(self, line):
         """Add a transaction interactively"""
@@ -803,12 +856,16 @@ def build_parser():
     p.add_argument("--end-date", help="Show transactions through this date (default: today)")
     p.add_argument("--status", help="Filter by status: pending, cleared, all")
     p.add_argument("--sort", choices=["asc", "desc"], default="desc", help="Sort order: asc or desc (default: desc)")
+    p.add_argument("--limit", type=int, help="Maximum number of transactions to display")
+    p.add_argument("--amount", help="Filter by amount (e.g. '>=100', '<50', '=25.00')")
 
     p = sub.add_parser("forecast", help="Show ledger including future transactions")
     p.add_argument("ledger", help="Ledger to forecast")
     p.add_argument("-d", default=None, help="Target date or duration (YYYY-MM-DD, +2w, +30d, +3m)")
     p.add_argument("--start-date", help="Show transactions from this date")
     p.add_argument("--sort", choices=["asc", "desc"], default="desc", help="Sort order: asc or desc (default: desc)")
+    p.add_argument("--limit", type=int, help="Maximum number of transactions to display")
+    p.add_argument("--amount", help="Filter by amount (e.g. '>=100', '<50', '=25.00')")
 
     p = sub.add_parser("add", help="Add a transaction")
     p.add_argument("ledger", help="Ledger to add to")

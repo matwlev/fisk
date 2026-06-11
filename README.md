@@ -86,8 +86,8 @@ fisk> quit
 |---------|-------------|
 | `create <name> [--balance AMT]` | Create a new ledger |
 | `show` | List all ledgers |
-| `show <name> [--start-date] [--end-date] [--status] [--sort]` | Display a ledger |
-| `forecast <name> -d <date\|duration> [--sort]` | Show including future transactions |
+| `show <name> [--start-date] [--end-date] [--status] [--sort] [--limit] [--amount]` | Display a ledger |
+| `forecast <name> -d <date\|duration> [--sort] [--limit] [--amount]` | Show including future transactions |
 | `add <name> --desc "..." --amount N [--date] [--category]` | Add a transaction |
 | `clear <name> <id> [id...]` | Mark transactions as cleared |
 | `delete <name> <id> [id...]` | Delete transactions (with confirmation) |
@@ -112,6 +112,18 @@ Dates accept `YYYY-MM-DD`, `today`, or relative durations:
 - `+7d` — 7 days from today
 - `+2w` — 2 weeks from today
 - `+3m` — 3 months from today
+
+## Filtering
+
+```bash
+fisk show checkbook --limit 10               # last 10 entries
+fisk show checkbook --amount ">=100"         # transactions $100+
+fisk show checkbook --amount "<50"           # under $50
+fisk show checkbook --status pending         # only pending
+fisk show checkbook --start-date 2026-05-01  # since a date
+```
+
+Amount filtering compares against the absolute value (ignores sign).
 
 ## Sort Order
 
