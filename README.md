@@ -85,11 +85,12 @@ fisk> quit
 |---------|-------------|
 | `create <name> [--balance AMT]` | Create a new ledger |
 | `show` | List all ledgers |
-| `show <name> [--start-date] [--end-date] [--status]` | Display a ledger |
-| `forecast <name> -d <date\|duration>` | Show including future transactions |
+| `show <name> [--start-date] [--end-date] [--status] [--sort]` | Display a ledger |
+| `forecast <name> -d <date\|duration> [--sort]` | Show including future transactions |
 | `add <name> --desc "..." --amount N [--date] [--category]` | Add a transaction |
 | `clear <name> <id> [id...]` | Mark transactions as cleared |
 | `delete <name> <id> [id...]` | Delete transactions (with confirmation) |
+| `import <name> --file <path>` | Import from an external CSV |
 | `use <name>` | Enter interactive mode for a ledger |
 | `--version` | Show version |
 
@@ -100,6 +101,14 @@ Dates accept `YYYY-MM-DD`, `today`, or relative durations:
 - `+2w` — 2 weeks from today
 - `+3m` — 3 months from today
 
+## Sort Order
+
+Transactions default to `desc` (most recent first). Use `--sort asc` for chronological order:
+
+```bash
+fisk show checkbook --sort asc
+```
+
 ## Transaction Status
 
 ```
@@ -109,6 +118,30 @@ future → pending → cleared
 - **future** — dated in the future, only visible in `forecast`
 - **pending** — entered but not yet confirmed at the bank
 - **cleared** — confirmed/posted
+
+## Importing
+
+Import transactions from an external CSV (e.g., a Google Sheets export):
+
+```bash
+fisk import checkbook --file ~/Downloads/export.csv
+```
+
+Auto-detects columns named `Date`, `Description`, `Credit`, `Debit`, and `✓`/`Cleared`. Separate credit/debit columns are combined into a single signed amount (debit becomes negative).
+
+Override column names if yours differ:
+
+```bash
+fisk import checkbook --file export.csv \
+  --date-col "Date" \
+  --credit-col "Deposit" \
+  --debit-col "Withdrawal" \
+  --cleared-col "Cleared"
+```
+
+Use `--amount-col` instead of `--credit-col`/`--debit-col` if your file has a single signed amount column.
+
+Supported date formats: `YYYY-MM-DD`, `MM/DD/YYYY`, `MM/DD/YY`.
 
 ## Storage
 

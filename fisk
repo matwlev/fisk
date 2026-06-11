@@ -7,6 +7,7 @@ import argparse
 import cmd
 import csv
 import os
+import readline
 import re
 import sys
 from datetime import date, timedelta
@@ -15,6 +16,23 @@ from pathlib import Path
 
 DEFAULT_DIR = Path.home() / ".fisk"
 FIELDNAMES = ["id", "date", "description", "amount", "category", "status"]
+
+
+def input_with_completion(prompt, options):
+    """Input with tab completion from a list of options."""
+    def completer(text, state):
+        matches = [o for o in options if o.lower().startswith(text.lower())]
+        return matches[state] if state < len(matches) else None
+    old_completer = readline.get_completer()
+    old_delims = readline.get_completer_delims()
+    readline.set_completer(completer)
+    readline.set_completer_delims("\t\n")
+    readline.parse_and_bind("tab: complete")
+    try:
+        return input(prompt)
+    finally:
+        readline.set_completer(old_completer)
+        readline.set_completer_delims(old_delims)
 
 
 def get_ledger_dir():
@@ -70,7 +88,7 @@ def parse_date_or_relative(val):
     return date.fromisoformat(val)
 
 
-def format_table(rows, include_future=False, start_date=None, end_date=None, status_filter=None):
+def format_table(rows, include_future=False, start_date=None, end_date=None, status_filter=None, sort_order="desc"):
     """Format rows into a table with debit/credit/balance columns."""
     filtered = []
     for r in sorted(rows, key=lambda x: (x["date"], int(x["id"]))):
@@ -107,6 +125,9 @@ def format_table(rows, include_future=False, start_date=None, end_date=None, sta
         for r in all_sorted:
             balance += Decimal(r["amount"])
             balances[r["id"]] = balance
+
+    if sort_order == "desc":
+        filtered = list(reversed(filtered))
 
     hdr = f"  {'#':>4}  {'Date':<10}  {'Description':<20}  {'Debit':>9}  {'Credit':>9}  {'Balance':>10}  {'Status'}"
     print(hdr)
@@ -156,7 +177,8 @@ def cmd_show(args):
     start = parse_date_or_relative(args.start_date) if args.start_date else None
     end = parse_date_or_relative(args.end_date) if args.end_date else date.today()
     status_filter = args.status if hasattr(args, "status") and args.status else None
-    format_table(rows, include_future=False, start_date=start, end_date=end, status_filter=status_filter)
+    sort_order = args.sort if hasattr(args, "sort") and args.sort else "desc"
+    format_table(rows, include_future=False, start_date=start, end_date=end, status_filter=status_filter, sort_order=sort_order)
 
 
 def cmd_forecast(args):
@@ -165,7 +187,8 @@ def cmd_forecast(args):
         return
     end = parse_date_or_relative(args.d) if args.d else date.today() + timedelta(days=30)
     start = parse_date_or_relative(args.start_date) if args.start_date else None
-    format_table(rows, include_future=True, start_date=start, end_date=end)
+    sort_order = args.sort if hasattr(args, "sort") and args.sort else "desc"
+    format_table(rows, include_future=True, start_date=start, end_date=end, sort_order=sort_order)
 
 
 def cmd_add_noninteractive(args):
@@ -241,7 +264,7 @@ class FiskRepl(cmd.Cmd):
         if rows is None:
             return
         # Parse inline flags
-        start, end, status = None, date.today(), None
+        start, end, status, sort_order = None, date.today(), None, "desc"
         i = 1
         while i < len(parts):
             if parts[i] == "--start-date" and i + 1 < len(parts):
@@ -253,9 +276,12 @@ class FiskRepl(cmd.Cmd):
             elif parts[i] == "--status" and i + 1 < len(parts):
                 status = parts[i + 1]
                 i += 2
+            elif parts[i] == "--sort" and i + 1 < len(parts):
+                sort_order = parts[i + 1]
+                i += 2
             else:
                 i += 1
-        format_table(rows, include_future=False, start_date=start, end_date=end, status_filter=status)
+        format_table(rows, include_future=False, start_date=start, end_date=end, status_filter=status, sort_order=sort_order)
 
     def do_forecast(self, line):
         """forecast <ledger> [-d DATE|DURATION]"""
@@ -269,6 +295,7 @@ class FiskRepl(cmd.Cmd):
             return
         end = date.today() + timedelta(days=30)
         start = None
+        sort_order = "desc"
         i = 1
         while i < len(parts):
             if parts[i] == "-d" and i + 1 < len(parts):
@@ -277,9 +304,12 @@ class FiskRepl(cmd.Cmd):
             elif parts[i] == "--start-date" and i + 1 < len(parts):
                 start = parse_date_or_relative(parts[i + 1])
                 i += 2
+            elif parts[i] == "--sort" and i + 1 < len(parts):
+                sort_order = parts[i + 1]
+                i += 2
             else:
                 i += 1
-        format_table(rows, include_future=True, start_date=start, end_date=end)
+        format_table(rows, include_future=True, start_date=start, end_date=end, sort_order=sort_order)
 
     def do_create(self, line):
         """create <name> [--balance AMOUNT]"""
@@ -341,7 +371,7 @@ class LedgerRepl(cmd.Cmd):
         if rows is None:
             return
         parts = line.split()
-        start, end, status = None, date.today(), None
+        start, end, status, sort_order = None, date.today(), None, "desc"
         i = 0
         while i < len(parts):
             if parts[i] == "--start-date" and i + 1 < len(parts):
@@ -353,20 +383,25 @@ class LedgerRepl(cmd.Cmd):
             elif parts[i] == "--status" and i + 1 < len(parts):
                 status = parts[i + 1]
                 i += 2
+            elif parts[i] == "--sort" and i + 1 < len(parts):
+                sort_order = parts[i + 1]
+                i += 2
             else:
                 i += 1
-        format_table(rows, include_future=False, start_date=start, end_date=end, status_filter=status)
+        format_table(rows, include_future=False, start_date=start, end_date=end, status_filter=status, sort_order=sort_order)
 
     def do_add(self, line):
         """Add a transaction interactively"""
         rows = read_ledger(self.name)
         if rows is None:
             return
+        descriptions = sorted(set(r["description"] for r in rows if r["status"] != "starting"))
+        categories = sorted(set(r["category"] for r in rows if r["category"]))
         try:
             d = input(f"  Date [{date.today().isoformat()}]: ").strip() or date.today().isoformat()
-            desc = input("  Description: ").strip()
+            desc = input_with_completion("  Description: ", descriptions).strip()
             amt = input("  Amount: ").strip()
-            cat = input("  Category []: ").strip()
+            cat = input_with_completion("  Category []: ", categories).strip()
         except (EOFError, KeyboardInterrupt):
             print("\n  Cancelled.")
             return
@@ -387,6 +422,53 @@ class LedgerRepl(cmd.Cmd):
         write_ledger(self.name, rows)
         print("  Added.")
 
+    def do_bulk(self, line):
+        """bulk - add multiple transactions with the same date"""
+        rows = read_ledger(self.name)
+        if rows is None:
+            return
+        try:
+            d = input(f"  Date [{date.today().isoformat()}]: ").strip() or date.today().isoformat()
+            date.fromisoformat(d)
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
+            return
+        except ValueError:
+            print("  Invalid date.")
+            return
+        status = "future" if date.fromisoformat(d) > date.today() else "pending"
+        count = 0
+        print("  Enter transactions (empty description to finish):")
+        while True:
+            descriptions = sorted(set(r["description"] for r in rows if r["status"] != "starting"))
+            categories = sorted(set(r["category"] for r in rows if r["category"]))
+            try:
+                desc = input_with_completion("  Description: ", descriptions).strip()
+                if not desc:
+                    break
+                amt = input("  Amount: ").strip()
+                Decimal(amt)
+                cat = input_with_completion("  Category []: ", categories).strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n  Stopping.")
+                break
+            except InvalidOperation:
+                print("  Invalid amount, skipping.")
+                continue
+            rows.append({
+                "id": str(next_id(rows)),
+                "date": d,
+                "description": desc,
+                "amount": amt,
+                "category": cat,
+                "status": status,
+            })
+            count += 1
+            print("  ✓")
+        if count:
+            write_ledger(self.name, rows)
+            print(f"  Added {count} transaction{'s' if count != 1 else ''}.")
+
     def do_edit(self, line):
         """edit <id> - edit a transaction"""
         tid = line.strip()
@@ -400,14 +482,16 @@ class LedgerRepl(cmd.Cmd):
         if not row:
             print(f"  Transaction {tid} not found.")
             return
+        descriptions = sorted(set(r["description"] for r in rows if r["status"] != "starting"))
+        categories = sorted(set(r["category"] for r in rows if r["category"]))
         try:
             row["date"] = input(f"  Date [{row['date']}]: ").strip() or row["date"]
-            row["description"] = input(f"  Description [{row['description']}]: ").strip() or row["description"]
+            row["description"] = input_with_completion(f"  Description [{row['description']}]: ", descriptions).strip() or row["description"]
             amt = input(f"  Amount [{row['amount']}]: ").strip()
             if amt:
                 Decimal(amt)
                 row["amount"] = amt
-            row["category"] = input(f"  Category [{row['category']}]: ").strip() or row["category"]
+            row["category"] = input_with_completion(f"  Category [{row['category']}]: ", categories).strip() or row["category"]
         except (EOFError, KeyboardInterrupt):
             print("\n  Cancelled.")
             return
@@ -472,6 +556,106 @@ class LedgerRepl(cmd.Cmd):
     do_EOF = do_back
 
 
+def cmd_import(args):
+    """Import transactions from an external CSV file."""
+    name = args.ledger
+    if not ledger_path(name).exists():
+        print(f"Ledger '{name}' not found. Create it first with: fisk create {name}")
+        return
+    src = Path(args.file)
+    if not src.exists():
+        print(f"File not found: {src}")
+        return
+
+    rows = read_ledger(name)
+    with open(src, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        headers = reader.fieldnames
+        print(f"  Source columns: {headers}")
+
+        # Column mapping
+        date_col = args.date_col or next((h for h in headers if h.lower().strip() == "date"), None)
+        desc_col = args.desc_col or next((h for h in headers if h.lower().strip() == "description"), None)
+        credit_col = args.credit_col or next((h for h in headers if h.lower().strip() == "credit"), None)
+        debit_col = args.debit_col or next((h for h in headers if h.lower().strip() == "debit"), None)
+        amount_col = args.amount_col or next((h for h in headers if h.lower().strip() == "amount"), None)
+        category_col = args.category_col or next((h for h in headers if h.lower().strip() == "category"), None)
+        cleared_col = args.cleared_col or next((h for h in headers if h.strip() in ("✓", "✔", "Cleared", "cleared")), None)
+
+        if not date_col or not desc_col:
+            print("  Could not auto-detect date/description columns. Use --date-col and --desc-col.")
+            return
+        if not credit_col and not debit_col and not amount_col:
+            print("  Could not detect amount columns. Use --amount-col or --credit-col/--debit-col.")
+            return
+
+        count = 0
+        for row in reader:
+            d = row.get(date_col, "").strip()
+            if not d:
+                continue
+            # Try to parse date
+            try:
+                parsed_date = date.fromisoformat(d)
+            except ValueError:
+                # Try common formats like MM/DD/YYYY
+                for fmt in ("%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y"):
+                    try:
+                        from datetime import datetime
+                        parsed_date = datetime.strptime(d, fmt).date()
+                        break
+                    except ValueError:
+                        continue
+                else:
+                    print(f"  Skipping row with unparseable date: {d}")
+                    continue
+
+            desc = row.get(desc_col, "").strip()
+            if not desc:
+                continue
+
+            # Compute amount
+            if amount_col:
+                amt_str = row.get(amount_col, "").strip().replace(",", "").replace("$", "")
+                if not amt_str:
+                    continue
+                amt = Decimal(amt_str)
+            else:
+                credit_str = row.get(credit_col, "").strip().replace(",", "").replace("$", "") if credit_col else ""
+                debit_str = row.get(debit_col, "").strip().replace(",", "").replace("$", "") if debit_col else ""
+                if credit_str:
+                    amt = Decimal(credit_str)
+                elif debit_str:
+                    amt = -abs(Decimal(debit_str))
+                else:
+                    continue
+
+            cat = row.get(category_col, "").strip() if category_col else ""
+
+            # Status from cleared column
+            if cleared_col:
+                cleared_val = row.get(cleared_col, "").strip()
+                status = "cleared" if cleared_val else "pending"
+            else:
+                status = "pending"
+
+            if parsed_date > date.today():
+                status = "future"
+
+            rows.append({
+                "id": str(next_id(rows)),
+                "date": parsed_date.isoformat(),
+                "description": desc,
+                "amount": str(amt),
+                "category": cat,
+                "status": status,
+            })
+            count += 1
+
+    write_ledger(name, rows)
+    print(f"  Imported {count} transactions into '{name}'.")
+
+
 # --- Main ---
 
 def build_parser():
@@ -491,11 +675,13 @@ def build_parser():
     p.add_argument("--start-date", help="Show transactions from this date (YYYY-MM-DD or 'today')")
     p.add_argument("--end-date", help="Show transactions through this date (default: today)")
     p.add_argument("--status", help="Filter by status: pending, cleared, all")
+    p.add_argument("--sort", choices=["asc", "desc"], default="desc", help="Sort order: asc or desc (default: desc)")
 
     p = sub.add_parser("forecast", help="Show ledger including future transactions")
     p.add_argument("ledger", help="Ledger to forecast")
     p.add_argument("-d", default=None, help="Target date or duration (YYYY-MM-DD, +2w, +30d, +3m)")
     p.add_argument("--start-date", help="Show transactions from this date")
+    p.add_argument("--sort", choices=["asc", "desc"], default="desc", help="Sort order: asc or desc (default: desc)")
 
     p = sub.add_parser("add", help="Add a transaction")
     p.add_argument("ledger", help="Ledger to add to")
@@ -511,6 +697,17 @@ def build_parser():
     p = sub.add_parser("delete", help="Delete transactions (with confirmation)")
     p.add_argument("ledger", help="Ledger name")
     p.add_argument("ids", nargs="+", help="Transaction IDs to delete")
+
+    p = sub.add_parser("import", help="Import transactions from an external CSV")
+    p.add_argument("ledger", help="Ledger to import into")
+    p.add_argument("--file", required=True, help="Path to the source CSV file")
+    p.add_argument("--date-col", help="Name of the date column")
+    p.add_argument("--desc-col", help="Name of the description column")
+    p.add_argument("--amount-col", help="Name of a single amount column (signed)")
+    p.add_argument("--credit-col", help="Name of the credit column")
+    p.add_argument("--debit-col", help="Name of the debit column")
+    p.add_argument("--category-col", help="Name of the category column")
+    p.add_argument("--cleared-col", help="Name of the cleared/checkmark column")
 
     return parser
 
@@ -535,6 +732,8 @@ def main():
         cmd_clear_noninteractive(args)
     elif args.command == "delete":
         cmd_delete_noninteractive(args)
+    elif args.command == "import":
+        cmd_import(args)
     else:
         parser.print_help()
 
