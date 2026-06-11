@@ -1,0 +1,543 @@
+#!/usr/bin/env python3
+"""fisk - personal finance ledger CLI"""
+
+VERSION = "0.1.0"
+
+import argparse
+import cmd
+import csv
+import os
+import re
+import sys
+from datetime import date, timedelta
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+
+DEFAULT_DIR = Path.home() / ".fisk"
+FIELDNAMES = ["id", "date", "description", "amount", "category", "status"]
+
+
+def get_ledger_dir():
+    d = Path(os.environ.get("FISK_DIR", str(DEFAULT_DIR)))
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def ledger_path(name):
+    return get_ledger_dir() / f"{name}.csv"
+
+
+def list_ledgers():
+    return sorted(p.stem for p in get_ledger_dir().glob("*.csv"))
+
+
+def read_ledger(name):
+    path = ledger_path(name)
+    if not path.exists():
+        print(f"Ledger '{name}' not found.")
+        return None
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def write_ledger(name, rows):
+    path = ledger_path(name)
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=FIELDNAMES)
+        w.writeheader()
+        w.writerows(rows)
+
+
+def next_id(rows):
+    if not rows:
+        return 1
+    return max(int(r["id"]) for r in rows) + 1
+
+
+def parse_date_or_relative(val):
+    """Parse YYYY-MM-DD, 'today', or relative like +2w, +30d, +3m."""
+    if val == "today":
+        return date.today()
+    m = re.match(r"^\+(\d+)([dwm])$", val)
+    if m:
+        n, unit = int(m.group(1)), m.group(2)
+        if unit == "d":
+            return date.today() + timedelta(days=n)
+        elif unit == "w":
+            return date.today() + timedelta(weeks=n)
+        elif unit == "m":
+            return date.today() + timedelta(days=n * 30)
+    return date.fromisoformat(val)
+
+
+def format_table(rows, include_future=False, start_date=None, end_date=None, status_filter=None):
+    """Format rows into a table with debit/credit/balance columns."""
+    filtered = []
+    for r in sorted(rows, key=lambda x: (x["date"], int(x["id"]))):
+        s = r["status"]
+        if not include_future and s == "future":
+            continue
+        if status_filter and s != status_filter and status_filter != "all":
+            continue
+        rd = date.fromisoformat(r["date"])
+        if start_date and rd < start_date:
+            continue
+        if end_date and rd > end_date:
+            continue
+        filtered.append(r)
+
+    if not filtered:
+        print("  No transactions.")
+        return
+
+    # Compute running balance from ALL rows up to each displayed row
+    all_sorted = sorted(rows, key=lambda x: (x["date"], int(x["id"])))
+    balance = Decimal("0")
+    balances = {}
+    for r in all_sorted:
+        if not include_future and r["status"] == "future":
+            continue
+        balance += Decimal(r["amount"])
+        balances[r["id"]] = balance
+
+    # For forecast, include future in balance calc
+    if include_future:
+        balance = Decimal("0")
+        balances = {}
+        for r in all_sorted:
+            balance += Decimal(r["amount"])
+            balances[r["id"]] = balance
+
+    hdr = f"  {'#':>4}  {'Date':<10}  {'Description':<20}  {'Debit':>9}  {'Credit':>9}  {'Balance':>10}  {'Status'}"
+    print(hdr)
+    print(f"  {'─'*4}  {'─'*10}  {'─'*20}  {'─'*9}  {'─'*9}  {'─'*10}  {'─'*6}")
+    for r in filtered:
+        amt = Decimal(r["amount"])
+        debit = f"{abs(amt):.2f}" if amt < 0 else ""
+        credit = f"{amt:.2f}" if amt > 0 else ""
+        bal = balances.get(r["id"], Decimal("0"))
+        st = {"cleared": "✓", "pending": "·", "future": "○", "starting": ""}.get(r["status"], "")
+        print(f"  {r['id']:>4}  {r['date']:<10}  {r['description']:<20}  {debit:>9}  {credit:>9}  {bal:>10.2f}  {st}")
+
+
+# --- Commands ---
+
+def cmd_create(args):
+    name = args.name
+    if ledger_path(name).exists():
+        print(f"Ledger '{name}' already exists.")
+        return
+    balance = args.balance if args.balance else "0.00"
+    rows = [{
+        "id": "1",
+        "date": date.today().isoformat(),
+        "description": "Opening balance",
+        "amount": balance,
+        "category": "",
+        "status": "starting",
+    }]
+    get_ledger_dir()
+    write_ledger(name, rows)
+    print(f"Created: {ledger_path(name)}")
+
+
+def cmd_show(args):
+    if not args.ledger:
+        ledgers = list_ledgers()
+        if not ledgers:
+            print("No ledgers. Use 'create <name>' to create one.")
+        else:
+            for l in ledgers:
+                print(f"  {l}")
+        return
+    rows = read_ledger(args.ledger)
+    if rows is None:
+        return
+    start = parse_date_or_relative(args.start_date) if args.start_date else None
+    end = parse_date_or_relative(args.end_date) if args.end_date else date.today()
+    status_filter = args.status if hasattr(args, "status") and args.status else None
+    format_table(rows, include_future=False, start_date=start, end_date=end, status_filter=status_filter)
+
+
+def cmd_forecast(args):
+    rows = read_ledger(args.ledger)
+    if rows is None:
+        return
+    end = parse_date_or_relative(args.d) if args.d else date.today() + timedelta(days=30)
+    start = parse_date_or_relative(args.start_date) if args.start_date else None
+    format_table(rows, include_future=True, start_date=start, end_date=end)
+
+
+def cmd_add_noninteractive(args):
+    rows = read_ledger(args.ledger)
+    if rows is None:
+        return
+    d = args.date if args.date else date.today().isoformat()
+    status = "future" if date.fromisoformat(d) > date.today() else "pending"
+    rows.append({
+        "id": str(next_id(rows)),
+        "date": d,
+        "description": args.desc,
+        "amount": args.amount,
+        "category": args.category or "",
+        "status": status,
+    })
+    write_ledger(args.ledger, rows)
+    print("Added.")
+
+
+def cmd_clear_noninteractive(args):
+    rows = read_ledger(args.ledger)
+    if rows is None:
+        return
+    ids = set(args.ids)
+    for r in rows:
+        if r["id"] in ids:
+            r["status"] = "cleared"
+    write_ledger(args.ledger, rows)
+    print("Cleared.")
+
+
+def cmd_delete_noninteractive(args):
+    rows = read_ledger(args.ledger)
+    if rows is None:
+        return
+    ids = set(args.ids)
+    to_delete = [r for r in rows if r["id"] in ids]
+    if not to_delete:
+        print("No matching transactions.")
+        return
+    for r in to_delete:
+        amt = Decimal(r["amount"])
+        sign = f"-{abs(amt):.2f}" if amt < 0 else f"{amt:.2f}"
+        print(f"  #{r['id']}  {r['date']}  {r['description']}  {sign}  {r['category']}")
+    try:
+        confirm = input("  Delete? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\n  Cancelled.")
+        return
+    if confirm != "y":
+        print("  Cancelled.")
+        return
+    rows = [r for r in rows if r["id"] not in ids]
+    write_ledger(args.ledger, rows)
+    print("Deleted.")
+
+
+# --- Interactive REPL ---
+
+class FiskRepl(cmd.Cmd):
+    prompt = "fisk> "
+
+    def do_show(self, line):
+        """show [ledger] [--start-date DATE] [--end-date DATE] [--status STATUS]"""
+        parts = line.split()
+        if not parts:
+            for l in list_ledgers():
+                print(f"  {l}")
+            return
+        name = parts[0]
+        rows = read_ledger(name)
+        if rows is None:
+            return
+        # Parse inline flags
+        start, end, status = None, date.today(), None
+        i = 1
+        while i < len(parts):
+            if parts[i] == "--start-date" and i + 1 < len(parts):
+                start = parse_date_or_relative(parts[i + 1])
+                i += 2
+            elif parts[i] == "--end-date" and i + 1 < len(parts):
+                end = parse_date_or_relative(parts[i + 1])
+                i += 2
+            elif parts[i] == "--status" and i + 1 < len(parts):
+                status = parts[i + 1]
+                i += 2
+            else:
+                i += 1
+        format_table(rows, include_future=False, start_date=start, end_date=end, status_filter=status)
+
+    def do_forecast(self, line):
+        """forecast <ledger> [-d DATE|DURATION]"""
+        parts = line.split()
+        if not parts:
+            print("Usage: forecast <ledger> [-d DATE|DURATION]")
+            return
+        name = parts[0]
+        rows = read_ledger(name)
+        if rows is None:
+            return
+        end = date.today() + timedelta(days=30)
+        start = None
+        i = 1
+        while i < len(parts):
+            if parts[i] == "-d" and i + 1 < len(parts):
+                end = parse_date_or_relative(parts[i + 1])
+                i += 2
+            elif parts[i] == "--start-date" and i + 1 < len(parts):
+                start = parse_date_or_relative(parts[i + 1])
+                i += 2
+            else:
+                i += 1
+        format_table(rows, include_future=True, start_date=start, end_date=end)
+
+    def do_create(self, line):
+        """create <name> [--balance AMOUNT]"""
+        parts = line.split()
+        if not parts:
+            print("Usage: create <name> [--balance AMOUNT]")
+            return
+        name = parts[0]
+        if ledger_path(name).exists():
+            print(f"Ledger '{name}' already exists.")
+            return
+        balance = "0.00"
+        if "--balance" in parts:
+            idx = parts.index("--balance")
+            if idx + 1 < len(parts):
+                balance = parts[idx + 1]
+        rows = [{
+            "id": "1",
+            "date": date.today().isoformat(),
+            "description": "Opening balance",
+            "amount": balance,
+            "category": "",
+            "status": "starting",
+        }]
+        write_ledger(name, rows)
+        print(f"Created: {ledger_path(name)}")
+
+    def do_use(self, line):
+        """use <ledger> - enter interactive mode for a ledger"""
+        name = line.strip()
+        if not name:
+            print("Usage: use <name>")
+            return
+        if not ledger_path(name).exists():
+            print(f"Ledger '{name}' not found.")
+            return
+        LedgerRepl(name).cmdloop()
+
+    def do_quit(self, line):
+        """Exit fisk"""
+        return True
+
+    def do_exit(self, line):
+        """Exit fisk"""
+        return True
+
+    do_EOF = do_quit
+
+
+class LedgerRepl(cmd.Cmd):
+    def __init__(self, name):
+        super().__init__()
+        self.name = name
+        self.prompt = f"{name}> "
+
+    def do_show(self, line):
+        """Show this ledger's transactions"""
+        rows = read_ledger(self.name)
+        if rows is None:
+            return
+        parts = line.split()
+        start, end, status = None, date.today(), None
+        i = 0
+        while i < len(parts):
+            if parts[i] == "--start-date" and i + 1 < len(parts):
+                start = parse_date_or_relative(parts[i + 1])
+                i += 2
+            elif parts[i] == "--end-date" and i + 1 < len(parts):
+                end = parse_date_or_relative(parts[i + 1])
+                i += 2
+            elif parts[i] == "--status" and i + 1 < len(parts):
+                status = parts[i + 1]
+                i += 2
+            else:
+                i += 1
+        format_table(rows, include_future=False, start_date=start, end_date=end, status_filter=status)
+
+    def do_add(self, line):
+        """Add a transaction interactively"""
+        rows = read_ledger(self.name)
+        if rows is None:
+            return
+        try:
+            d = input(f"  Date [{date.today().isoformat()}]: ").strip() or date.today().isoformat()
+            desc = input("  Description: ").strip()
+            amt = input("  Amount: ").strip()
+            cat = input("  Category []: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
+            return
+        try:
+            Decimal(amt)
+        except InvalidOperation:
+            print("  Invalid amount.")
+            return
+        status = "future" if date.fromisoformat(d) > date.today() else "pending"
+        rows.append({
+            "id": str(next_id(rows)),
+            "date": d,
+            "description": desc,
+            "amount": amt,
+            "category": cat,
+            "status": status,
+        })
+        write_ledger(self.name, rows)
+        print("  Added.")
+
+    def do_edit(self, line):
+        """edit <id> - edit a transaction"""
+        tid = line.strip()
+        if not tid:
+            print("Usage: edit <id>")
+            return
+        rows = read_ledger(self.name)
+        if rows is None:
+            return
+        row = next((r for r in rows if r["id"] == tid), None)
+        if not row:
+            print(f"  Transaction {tid} not found.")
+            return
+        try:
+            row["date"] = input(f"  Date [{row['date']}]: ").strip() or row["date"]
+            row["description"] = input(f"  Description [{row['description']}]: ").strip() or row["description"]
+            amt = input(f"  Amount [{row['amount']}]: ").strip()
+            if amt:
+                Decimal(amt)
+                row["amount"] = amt
+            row["category"] = input(f"  Category [{row['category']}]: ").strip() or row["category"]
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
+            return
+        except InvalidOperation:
+            print("  Invalid amount.")
+            return
+        write_ledger(self.name, rows)
+        print("  Updated.")
+
+    def do_delete(self, line):
+        """delete <id> [id...] - remove transactions"""
+        ids = line.split()
+        if not ids:
+            print("Usage: delete <id> [id...]")
+            return
+        rows = read_ledger(self.name)
+        if rows is None:
+            return
+        to_delete = [r for r in rows if r["id"] in set(ids)]
+        if not to_delete:
+            print("  No matching transactions.")
+            return
+        for r in to_delete:
+            amt = Decimal(r["amount"])
+            sign = f"-{abs(amt):.2f}" if amt < 0 else f"{amt:.2f}"
+            print(f"  #{r['id']}  {r['date']}  {r['description']}  {sign}  {r['category']}")
+        try:
+            confirm = input("  Delete? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
+            return
+        if confirm != "y":
+            print("  Cancelled.")
+            return
+        rows = [r for r in rows if r["id"] not in set(ids)]
+        write_ledger(self.name, rows)
+        print("  Deleted.")
+
+    def do_clear(self, line):
+        """clear <id> [id...] - mark transactions as cleared"""
+        ids = line.split()
+        if not ids:
+            print("Usage: clear <id> [id...]")
+            return
+        rows = read_ledger(self.name)
+        if rows is None:
+            return
+        for r in rows:
+            if r["id"] in set(ids):
+                r["status"] = "cleared"
+        write_ledger(self.name, rows)
+        print("  Cleared.")
+
+    def do_back(self, line):
+        """Return to fisk prompt"""
+        return True
+
+    def do_quit(self, line):
+        """Exit fisk entirely"""
+        sys.exit(0)
+
+    do_EOF = do_back
+
+
+# --- Main ---
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="fisk",
+        description="Personal finance ledger. Run with no arguments for interactive mode.",
+    )
+    parser.add_argument("--version", action="version", version=f"fisk {VERSION}")
+    sub = parser.add_subparsers(dest="command")
+
+    p = sub.add_parser("create", help="Create a new ledger")
+    p.add_argument("name", help="Ledger name")
+    p.add_argument("--balance", default="0.00", help="Starting balance (default: 0.00)")
+
+    p = sub.add_parser("show", help="List ledgers or display a ledger")
+    p.add_argument("ledger", nargs="?", help="Ledger to display (omit to list all)")
+    p.add_argument("--start-date", help="Show transactions from this date (YYYY-MM-DD or 'today')")
+    p.add_argument("--end-date", help="Show transactions through this date (default: today)")
+    p.add_argument("--status", help="Filter by status: pending, cleared, all")
+
+    p = sub.add_parser("forecast", help="Show ledger including future transactions")
+    p.add_argument("ledger", help="Ledger to forecast")
+    p.add_argument("-d", default=None, help="Target date or duration (YYYY-MM-DD, +2w, +30d, +3m)")
+    p.add_argument("--start-date", help="Show transactions from this date")
+
+    p = sub.add_parser("add", help="Add a transaction")
+    p.add_argument("ledger", help="Ledger to add to")
+    p.add_argument("--date", help="Transaction date (default: today)")
+    p.add_argument("--desc", required=True, help="Description")
+    p.add_argument("--amount", required=True, help="Amount (positive for credit, negative for debit)")
+    p.add_argument("--category", default="", help="Category (optional)")
+
+    p = sub.add_parser("clear", help="Mark transactions as cleared")
+    p.add_argument("ledger", help="Ledger name")
+    p.add_argument("ids", nargs="+", help="Transaction IDs to clear")
+
+    p = sub.add_parser("delete", help="Delete transactions (with confirmation)")
+    p.add_argument("ledger", help="Ledger name")
+    p.add_argument("ids", nargs="+", help="Transaction IDs to delete")
+
+    return parser
+
+
+def main():
+    if len(sys.argv) == 1:
+        FiskRepl().cmdloop()
+        return
+
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if args.command == "create":
+        cmd_create(args)
+    elif args.command == "show":
+        cmd_show(args)
+    elif args.command == "forecast":
+        cmd_forecast(args)
+    elif args.command == "add":
+        cmd_add_noninteractive(args)
+    elif args.command == "clear":
+        cmd_clear_noninteractive(args)
+    elif args.command == "delete":
+        cmd_delete_noninteractive(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
