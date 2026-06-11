@@ -275,6 +275,8 @@ def generate_due_dates(bill, start, end):
 
 def get_next_due(bill):
     """Get next unpaid due date for a bill."""
+    if not bill["start_date"]:
+        return None
     paid_through = date.fromisoformat(bill["paid_through"]) if bill["paid_through"] else None
     start = paid_through + timedelta(days=1) if paid_through else date.fromisoformat(bill["start_date"])
     end = date.today() + timedelta(days=365)
@@ -292,8 +294,14 @@ def get_upcoming_bills(window_days=30):
         if not bills:
             continue
         for bill in bills:
+            if not bill["start_date"]:
+                continue
             paid_through = date.fromisoformat(bill["paid_through"]) if bill["paid_through"] else None
             start = paid_through + timedelta(days=1) if paid_through else date.fromisoformat(bill["start_date"])
+            # Clamp start to avoid showing ancient unpaid dates
+            earliest = today - timedelta(days=window_days)
+            if start < earliest:
+                start = earliest
             # Show unpaid bills due up to end of window
             dates = generate_due_dates(bill, start, end)
             for d in dates:
