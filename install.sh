@@ -3,24 +3,23 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN="$HOME/.local/bin"
-DATA_DIR="$HOME/.fisk"
-no_data=false
+FISK_HOME="$HOME/.fisk"
 
+update_only=false
+reset_config=false
 for arg in "$@"; do
   case $arg in
     --help)
       echo "Usage: ./install.sh [OPTIONS]"
       echo ""
       echo "Options:"
-      echo "  --update           Update binary only (skip data directory setup)"
-      echo "  --no-data          Skip creating the data directory"
-      echo "  --data-dir=PATH    Create data directory at PATH (sets FISK_DIR in shell rc)"
+      echo "  --update           Update binary only (skip config setup)"
+      echo "  --reset-config     Overwrite existing ~/.fisk/config"
       echo "  --help             Show this help message"
       exit 0
       ;;
-    --update)       no_data=true ;;
-    --no-data)      no_data=true ;;
-    --data-dir=*)   DATA_DIR="${arg#*=}" ;;
+    --update)       update_only=true ;;
+    --reset-config) reset_config=true ;;
   esac
 done
 
@@ -36,20 +35,32 @@ if ! echo "$PATH" | grep -q "$BIN"; then
   echo "Added ~/.local/bin to PATH in $(basename "$SHELL_RC"). Restart your terminal or run: source $SHELL_RC"
 fi
 
-# Create data directory
-if $no_data; then
+if $update_only; then
   echo "fisk updated in ~/.local/bin"
   exit 0
 fi
 
-mkdir -p "$DATA_DIR"
-
-if [ "$DATA_DIR" != "$HOME/.fisk" ]; then
-  SHELL_RC="$HOME/.zshrc"
-  [ -f "$HOME/.bashrc" ] && [ ! -f "$HOME/.zshrc" ] && SHELL_RC="$HOME/.bashrc"
-  grep -q "FISK_DIR" "$SHELL_RC" 2>/dev/null || echo "export FISK_DIR=\"$DATA_DIR\"" >> "$SHELL_RC"
-  echo "Added FISK_DIR=$DATA_DIR to $(basename "$SHELL_RC")"
+# Set up ~/.fisk/config
+if [[ -f "$FISK_HOME/config" ]] && ! $reset_config; then
+  echo "fisk installed to ~/.local/bin (~/.fisk/config already exists, skipping)"
+  exit 0
 fi
 
+mkdir -p "$FISK_HOME"
+cat > "$FISK_HOME/config" <<EOF
+# fisk config
+# Config lookup order: ./fisk.config, then ~/.fisk/config
+
+[ledgers]
+# Map ledger names to CSV file paths
+# checkbook  ~/finances/checkbook.csv
+# savings    ~/finances/savings.csv
+
+[defaults]
+# Default flags applied to every command
+# --sort desc
+# --limit 20
+EOF
+
 echo "fisk installed to ~/.local/bin"
-echo "Data directory: $DATA_DIR"
+echo "Config created at ~/.fisk/config"

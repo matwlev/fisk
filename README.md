@@ -18,12 +18,11 @@ cd ~/projects/fisk
 ./install.sh
 ```
 
-Installs to `~/.local/bin/fisk`. Data is stored in `~/.fisk/`.
+Installs to `~/.local/bin/fisk` and creates `~/.fisk/config`.
 
 ```bash
-./install.sh --update                # update binary only, skip data directory
-./install.sh --no-data               # same as --update
-./install.sh --data-dir=~/Dropbox/finances  # custom data directory (sets FISK_DIR in shell rc)
+./install.sh --update         # update binary only, skip config
+./install.sh --reset-config   # overwrite existing ~/.fisk/config
 ```
 
 ## Uninstall
@@ -185,11 +184,25 @@ Supported date formats (auto-detected): `YYYY-MM-DD`, `MM/DD/YYYY`, `MM/DD/YY`. 
 
 ## Storage
 
-CSV files are stored in `~/.fisk/` by default. Set the `FISK_DIR` environment variable to use a different location:
+On first install, fisk creates `~/.fisk/config`. Config lookup order:
 
-```bash
-export FISK_DIR=~/Dropbox/finances
+1. `--config <file>` flag
+2. `./fisk.config` (local — useful for per-project setups)
+3. `~/.fisk/config` (global)
+
+Config format:
+
 ```
+[ledgers]
+checkbook  ~/finances/checkbook.csv
+savings    ~/finances/savings.csv
+
+[defaults]
+--sort desc
+--limit 20
+```
+
+Ledgers not mapped in config are stored in `~/fisk/` by default. Override with the `FISK_DIR` environment variable.
 
 The CSV format is simple and portable:
 

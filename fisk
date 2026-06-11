@@ -14,7 +14,7 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-DEFAULT_DIR = Path.home() / ".fisk"
+DEFAULT_DIR = Path.home() / "fisk"
 FIELDNAMES = ["id", "date", "description", "amount", "category", "status", "notes"]
 
 
@@ -35,18 +35,76 @@ def input_with_completion(prompt, options):
         readline.set_completer_delims(old_delims)
 
 
+def find_config():
+    """Find config: --config flag, then ./fisk.config, then ~/.fisk/config."""
+    for i, arg in enumerate(sys.argv):
+        if arg in ("--config", "-c") and i + 1 < len(sys.argv):
+            return Path(sys.argv[i + 1])
+    if Path("./fisk.config").exists():
+        return Path("./fisk.config")
+    if (Path.home() / ".fisk" / "config").exists():
+        return Path.home() / ".fisk" / "config"
+    return None
+
+
+def load_config():
+    """Load config. Returns dict with 'ledgers' mapping and 'defaults' list."""
+    config = {"ledgers": {}, "defaults": []}
+    config_file = find_config()
+    if not config_file or not config_file.exists():
+        return config
+    section = ""
+    for line in config_file.read_text().splitlines():
+        line = line.split("#")[0].strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            continue
+        if section == "ledgers":
+            parts = line.split(None, 1)
+            if len(parts) == 2:
+                config["ledgers"][parts[0]] = str(Path(parts[1]).expanduser())
+        elif section == "defaults":
+            config["defaults"].append(line)
+    return config
+
+
+_config = None
+
+
+def get_config():
+    global _config
+    if _config is None:
+        _config = load_config()
+    return _config
+
+
 def get_ledger_dir():
-    d = Path(os.environ.get("FISK_DIR", str(DEFAULT_DIR)))
+    """Fallback directory for ledgers not in config."""
+    env = os.environ.get("FISK_DIR")
+    if env:
+        d = Path(env)
+    else:
+        d = DEFAULT_DIR
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def ledger_path(name):
+    config = get_config()
+    if name in config["ledgers"]:
+        return Path(config["ledgers"][name])
     return get_ledger_dir() / f"{name}.csv"
 
 
 def list_ledgers():
-    return sorted(p.stem for p in get_ledger_dir().glob("*.csv"))
+    config = get_config()
+    names = set(config["ledgers"].keys())
+    d = get_ledger_dir()
+    if d.exists():
+        names.update(p.stem for p in d.glob("*.csv"))
+    return sorted(names)
 
 
 def read_ledger(name):
@@ -105,8 +163,8 @@ def parse_amount_filter(val):
     return (op, threshold)
 
 
-def format_table(rows, include_future=False, start_date=None, end_date=None, status_filter=None, sort_order="desc", limit=None, amount_filter=None):
-    """Format rows into a table with debit/credit/balance columns."""
+def format_table(rows, include_future=False, start_date=None, end_date=None, status_filter=None, sort_order="desc", limit=None, amount_filter=None, offset=0):
+    """Format rows into a table with debit/credit/balance columns. Returns total count for pagination."""
     filtered = []
     for r in sorted(rows, key=lambda x: (x["date"], int(x["id"]))):
         s = r["status"]
@@ -164,11 +222,9 @@ def format_table(rows, include_future=False, start_date=None, end_date=None, sta
         limit = 20
     if limit == 0:
         hidden = 0
-    elif total > limit:
-        filtered = filtered[:limit]
-        hidden = total - limit
     else:
-        hidden = 0
+        filtered = filtered[offset:offset + limit]
+        hidden = total - offset - len(filtered)
 
     hdr = f"  {'#':>4}  {'Date':<10}  {'Description':<20}  {'Debit':>10}  {'Credit':>10}  {'Balance':>11}  {'Status':<10}"
     print(hdr)
@@ -182,8 +238,9 @@ def format_table(rows, include_future=False, start_date=None, end_date=None, sta
         st = r["status"] if r["status"] != "starting" else ""
         desc = r["description"][:19] + "…" if len(r["description"]) > 20 else r["description"]
         print(f"  {r['id']:>4}  {r['date']:<10}  {desc:<20}  {debit}  {credit}  {bal_str}  {st}")
-    if hidden:
-        print(f"  ...{hidden} transaction{'s' if hidden != 1 else ''} hidden. Use --limit to show more.")
+    if hidden > 0:
+        print(f"  ...{hidden} more transaction{'s' if hidden != 1 else ''}. Use 'show next' or --limit to see more.")
+    return total
 
 
 # --- Commands ---
@@ -303,12 +360,19 @@ def cmd_delete_noninteractive(args):
 class FiskRepl(cmd.Cmd):
     prompt = "fisk> "
 
+    def __init__(self):
+        super().__init__()
+        self._last_show = None  # stores params for pagination
+
     def do_show(self, line):
         """show [ledger] [--start-date DATE] [--end-date DATE] [--status STATUS]"""
         parts = line.split()
         if not parts:
             for l in list_ledgers():
                 print(f"  {l}")
+            return
+        if parts[0] == "next":
+            self.do_next(" ".join(parts[1:]))
             return
         name = parts[0]
         rows = read_ledger(name)
@@ -338,7 +402,36 @@ class FiskRepl(cmd.Cmd):
                 i += 2
             else:
                 i += 1
+        effective_limit = limit if limit is not None else 20
+        self._last_show = {
+            "name": name, "start": start, "end": end, "status": status,
+            "sort_order": sort_order, "limit": effective_limit, "amount_filter": amount_filter,
+            "offset": effective_limit,
+        }
         format_table(rows, include_future=False, start_date=start, end_date=end, status_filter=status, sort_order=sort_order, limit=limit, amount_filter=amount_filter)
+
+    def do_next(self, line):
+        """show next [--limit N] - show the next page of transactions"""
+        if not self._last_show:
+            print("  No previous show command. Run 'show <ledger>' first.")
+            return
+        parts = line.split()
+        limit = self._last_show["limit"]
+        i = 0
+        while i < len(parts):
+            if parts[i] == "--limit" and i + 1 < len(parts):
+                limit = int(parts[i + 1])
+                i += 2
+            else:
+                i += 1
+        p = self._last_show
+        rows = read_ledger(p["name"])
+        if rows is None:
+            return
+        format_table(rows, include_future=False, start_date=p["start"], end_date=p["end"],
+                     status_filter=p["status"], sort_order=p["sort_order"], limit=limit,
+                     amount_filter=p["amount_filter"], offset=p["offset"])
+        p["offset"] += limit
 
     def do_forecast(self, line):
         """forecast <ledger> [-d DATE|DURATION]"""
@@ -430,6 +523,7 @@ class LedgerRepl(cmd.Cmd):
         super().__init__()
         self.name = name
         self.prompt = f"{name}> "
+        self._last_show = None
 
     def do_show(self, line):
         """Show this ledger's transactions"""
@@ -437,6 +531,9 @@ class LedgerRepl(cmd.Cmd):
         if rows is None:
             return
         parts = line.split()
+        if parts and parts[0] == "next":
+            self.do_next(" ".join(parts[1:]))
+            return
         start, end, status, sort_order, limit, amount_filter = None, date.today(), None, "desc", None, None
         i = 0
         while i < len(parts):
@@ -460,7 +557,36 @@ class LedgerRepl(cmd.Cmd):
                 i += 2
             else:
                 i += 1
+        effective_limit = limit if limit is not None else 20
+        self._last_show = {
+            "start": start, "end": end, "status": status,
+            "sort_order": sort_order, "limit": effective_limit, "amount_filter": amount_filter,
+            "offset": effective_limit,
+        }
         format_table(rows, include_future=False, start_date=start, end_date=end, status_filter=status, sort_order=sort_order, limit=limit, amount_filter=amount_filter)
+
+    def do_next(self, line):
+        """show next [--limit N] - show the next page of transactions"""
+        if not self._last_show:
+            print("  No previous show command. Run 'show' first.")
+            return
+        parts = line.split()
+        limit = self._last_show["limit"]
+        i = 0
+        while i < len(parts):
+            if parts[i] == "--limit" and i + 1 < len(parts):
+                limit = int(parts[i + 1])
+                i += 2
+            else:
+                i += 1
+        p = self._last_show
+        rows = read_ledger(self.name)
+        if rows is None:
+            return
+        format_table(rows, include_future=False, start_date=p["start"], end_date=p["end"],
+                     status_filter=p["status"], sort_order=p["sort_order"], limit=limit,
+                     amount_filter=p["amount_filter"], offset=p["offset"])
+        p["offset"] += limit
 
     def do_add(self, line):
         """Add a transaction interactively"""
