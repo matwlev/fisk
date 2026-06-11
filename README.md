@@ -140,9 +140,17 @@ fisk import checkbook --file export.csv \
   --cleared-col "Cleared"
 ```
 
+Use `--date-format` for non-standard date formats (Python strptime syntax):
+
+```bash
+fisk import checkbook --file export.csv --date-format "%a. %m/%d/%y"   # "Fri. 06/05/26"
+```
+
+All dates are converted to `YYYY-MM-DD` on import.
+
 Use `--amount-col` instead of `--credit-col`/`--debit-col` if your file has a single signed amount column.
 
-Supported date formats: `YYYY-MM-DD`, `MM/DD/YYYY`, `MM/DD/YY`.
+Supported date formats (auto-detected): `YYYY-MM-DD`, `MM/DD/YYYY`, `MM/DD/YY`. Use `--date-format` for anything else.
 
 ## Storage
 

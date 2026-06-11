@@ -590,25 +590,34 @@ def cmd_import(args):
             return
 
         count = 0
+        date_fmt = args.date_format if hasattr(args, "date_format") else None
         for row in reader:
             d = row.get(date_col, "").strip()
             if not d:
                 continue
             # Try to parse date
-            try:
-                parsed_date = date.fromisoformat(d)
-            except ValueError:
-                # Try common formats like MM/DD/YYYY
-                for fmt in ("%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y"):
-                    try:
-                        from datetime import datetime
-                        parsed_date = datetime.strptime(d, fmt).date()
-                        break
-                    except ValueError:
-                        continue
-                else:
+            parsed_date = None
+            if date_fmt:
+                try:
+                    from datetime import datetime
+                    parsed_date = datetime.strptime(d, date_fmt).date()
+                except ValueError:
                     print(f"  Skipping row with unparseable date: {d}")
                     continue
+            else:
+                try:
+                    parsed_date = date.fromisoformat(d)
+                except ValueError:
+                    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y"):
+                        try:
+                            from datetime import datetime
+                            parsed_date = datetime.strptime(d, fmt).date()
+                            break
+                        except ValueError:
+                            continue
+                    else:
+                        print(f"  Skipping row with unparseable date: {d}")
+                        continue
 
             desc = row.get(desc_col, "").strip()
             if not desc:
@@ -702,6 +711,7 @@ def build_parser():
     p.add_argument("ledger", help="Ledger to import into")
     p.add_argument("--file", required=True, help="Path to the source CSV file")
     p.add_argument("--date-col", help="Name of the date column")
+    p.add_argument("--date-format", help="strptime format for dates (e.g. '%%a. %%m/%%d/%%y' for 'Fri. 06/05/26')")
     p.add_argument("--desc-col", help="Name of the description column")
     p.add_argument("--amount-col", help="Name of a single amount column (signed)")
     p.add_argument("--credit-col", help="Name of the credit column")
