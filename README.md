@@ -97,6 +97,7 @@ fisk> quit
 | `import <name> --file <path>` | Import from an external CSV |
 | `sort <name>` | Sort all transactions by date (reassigns IDs) |
 | `sort <name> <id> <position>` | Move a transaction to a position |
+| `summary <name> [--description] [--category] [--start-date] [--end-date]` | Transaction statistics and top-10 breakdowns |
 | `use <name>` | Enter interactive mode for a ledger |
 | → `add` | Add a transaction |
 | → `bulk` | Add multiple transactions with the same date |
@@ -105,6 +106,7 @@ fisk> quit
 | → `clear <id>` | Mark as cleared |
 | → `reconcile` | Walk through unreconciled transactions, verify balance |
 | → `forecast [-d]` | Show including future transactions |
+| → `summary [--description] [--category]` | Transaction statistics |
 | → `details <id>` | Show full transaction details including notes |
 | → `sort` | Sort all transactions by date (reassigns IDs) |
 | → `sort <id> <pos>` | Move a transaction to a position (reassigns IDs) |

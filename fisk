@@ -685,6 +685,40 @@ class LedgerRepl(cmd.Cmd):
                 i += 1
         format_table(rows, include_future=True, start_date=start, end_date=end, sort_order=sort_order, limit=limit, amount_filter=amount_filter)
 
+    def do_summary(self, line):
+        """summary [--description TEXT] [--category TEXT] [--start-date] [--end-date]"""
+        rows = read_ledger(self.name)
+        if rows is None:
+            return
+        parts = line.split()
+        description, category, start_date, end_date = None, None, None, None
+        i = 0
+        while i < len(parts):
+            if parts[i] == "--description" and i + 1 < len(parts):
+                description = parts[i + 1]
+                i += 2
+            elif parts[i] == "--category" and i + 1 < len(parts):
+                category = parts[i + 1]
+                i += 2
+            elif parts[i] == "--start-date" and i + 1 < len(parts):
+                start_date = parts[i + 1]
+                i += 2
+            elif parts[i] == "--end-date" and i + 1 < len(parts):
+                end_date = parts[i + 1]
+                i += 2
+            else:
+                i += 1
+        # Reuse cmd_summary by building a namespace
+        class Args:
+            pass
+        args = Args()
+        args.ledger = self.name
+        args.description = description
+        args.category = category
+        args.start_date = start_date
+        args.end_date = end_date
+        cmd_summary(args)
+
     def do_add(self, line):
         """Add a transaction interactively"""
         rows = read_ledger(self.name)
@@ -1146,6 +1180,82 @@ def cmd_sort_noninteractive(args):
         print("Sorted by date. IDs reassigned.")
 
 
+def cmd_summary(args):
+    rows = read_ledger(args.ledger)
+    if rows is None:
+        return
+    # Filter out starting balance
+    txns = [r for r in rows if r["status"] != "starting"]
+    # Apply filters
+    if args.description:
+        term = args.description.lower()
+        txns = [r for r in txns if term in r["description"].lower()]
+    if args.category:
+        term = args.category.lower()
+        txns = [r for r in txns if r["category"].lower() == term]
+    if args.start_date:
+        start = parse_date_or_relative(args.start_date)
+        txns = [r for r in txns if date.fromisoformat(r["date"]) >= start]
+    if args.end_date:
+        end = parse_date_or_relative(args.end_date)
+        txns = [r for r in txns if date.fromisoformat(r["date"]) <= end]
+    if not txns:
+        print("  No matching transactions.")
+        return
+    amounts = [Decimal(r["amount"]) for r in txns]
+    debits = [a for a in amounts if a < 0]
+    credits = [a for a in amounts if a > 0]
+    total = sum(amounts)
+    print(f"  Transactions:  {len(txns)}")
+    print(f"  Total:         ${total:,.2f}")
+    if debits:
+        print(f"  Total spent:   ${sum(debits):,.2f}")
+        print(f"  Highest debit: ${min(debits):,.2f}")
+        print(f"  Lowest debit:  ${max(debits):,.2f}")
+        print(f"  Avg debit:     ${sum(debits) / len(debits):,.2f}")
+    if credits:
+        print(f"  Total income:  ${sum(credits):,.2f}")
+        print(f"  Highest credit:${max(credits):,.2f}")
+        print(f"  Lowest credit: ${min(credits):,.2f}")
+        print(f"  Avg credit:    ${sum(credits) / len(credits):,.2f}")
+    if not args.description and not args.category:
+        # Show breakdown by category
+        cats = {}
+        for r in txns:
+            cat = r["category"] or "(uncategorized)"
+            cats.setdefault(cat, Decimal("0"))
+            cats[cat] += Decimal(r["amount"])
+        print(f"\n  By category:")
+        for cat, amt in sorted(cats.items(), key=lambda x: x[1]):
+            print(f"    {cat:<20} ${amt:>10,.2f}")
+
+        # Top 10s by description
+        descs = {}
+        for r in txns:
+            d = r["description"]
+            descs.setdefault(d, []).append(Decimal(r["amount"]))
+
+        print(f"\n  Top 10 by total spent:")
+        by_total = sorted(descs.items(), key=lambda x: sum(x[1]))
+        for desc, amts in by_total[:10]:
+            if sum(amts) >= 0:
+                continue
+            print(f"    {desc:<20} ${sum(amts):>10,.2f}  ({len(amts)} txn)")
+
+        print(f"\n  Top 10 by avg spent:")
+        by_avg = sorted(descs.items(), key=lambda x: sum(x[1]) / len(x[1]))
+        for desc, amts in by_avg[:10]:
+            avg = sum(amts) / len(amts)
+            if avg >= 0:
+                continue
+            print(f"    {desc:<20} ${avg:>10,.2f}  ({len(amts)} txn)")
+
+        print(f"\n  Top 10 by frequency:")
+        by_freq = sorted(descs.items(), key=lambda x: -len(x[1]))
+        for desc, amts in by_freq[:10]:
+            print(f"    {desc:<20} {len(amts):>3} txn  ${sum(amts):>10,.2f}")
+
+
 # --- Main ---
 
 def build_parser():
@@ -1212,6 +1322,13 @@ def build_parser():
     p.add_argument("id", nargs="?", help="Transaction ID to move")
     p.add_argument("position", nargs="?", type=int, help="Target position")
 
+    p = sub.add_parser("summary", help="Summary statistics for a ledger")
+    p.add_argument("ledger", help="Ledger name")
+    p.add_argument("--description", help="Filter by description (partial match)")
+    p.add_argument("--category", help="Filter by category (exact match)")
+    p.add_argument("--start-date", help="Include transactions from this date")
+    p.add_argument("--end-date", help="Include transactions through this date")
+
     return parser
 
 
@@ -1239,6 +1356,8 @@ def main():
         cmd_import(args)
     elif args.command == "sort":
         cmd_sort_noninteractive(args)
+    elif args.command == "summary":
+        cmd_summary(args)
     else:
         parser.print_help()
 
