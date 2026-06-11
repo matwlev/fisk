@@ -162,16 +162,16 @@ def format_table(rows, include_future=False, start_date=None, end_date=None, sta
     if limit:
         filtered = filtered[:limit]
 
-    hdr = f"  {'#':>4}  {'Date':<10}  {'Description':<20}  {'Debit':>10}  {'Credit':>10}  {'Balance':>11}  {'Status'}"
+    hdr = f"  {'#':>4}  {'Date':<10}  {'Description':<20}  {'Debit':>10}  {'Credit':>10}  {'Balance':>11}  {'Status':<10}"
     print(hdr)
-    print(f"  {'─'*4}  {'─'*10}  {'─'*20}  {'─'*10}  {'─'*10}  {'─'*11}  {'─'*6}")
+    print(f"  {'─'*4}  {'─'*10}  {'─'*20}  {'─'*10}  {'─'*10}  {'─'*11}  {'─'*10}")
     for r in filtered:
         amt = Decimal(r["amount"])
         debit = "$" + f"{abs(amt):,.2f}".rjust(9) if amt < 0 else " " * 10
         credit = "$" + f"{amt:,.2f}".rjust(9) if amt > 0 else " " * 10
         bal = balances.get(r["id"], Decimal("0"))
         bal_str = "$" + f"{bal:,.2f}".rjust(10)
-        st = {"cleared": "✓", "pending": "·", "future": "○", "starting": "", "reconciled": "◆"}.get(r["status"], "")
+        st = r["status"] if r["status"] != "starting" else ""
         desc = r["description"][:19] + "…" if len(r["description"]) > 20 else r["description"]
         print(f"  {r['id']:>4}  {r['date']:<10}  {desc:<20}  {debit}  {credit}  {bal_str}  {st}")
 

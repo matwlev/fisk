@@ -66,10 +66,10 @@ fisk> show
 
 fisk> show checkbook
      #  Date        Description                Debit      Credit      Balance  Status
-  ────  ──────────  ────────────────────  ──────────  ──────────  ───────────  ──────
+  ────  ──────────  ────────────────────  ──────────  ──────────  ───────────  ──────────
      1  2026-06-11  Opening balance                   $ 4,200.00  $  4,200.00
-     2  2026-06-11  Electric bill         $   142.50              $  4,057.50  ✓
-     3  2026-06-11  Paycheck                          $ 3,200.00  $  7,257.50  ·
+     2  2026-06-11  Electric bill         $   142.50              $  4,057.50  cleared
+     3  2026-06-11  Paycheck                          $ 3,200.00  $  7,257.50  pending
 
 fisk> use checkbook
 checkbook> add
@@ -141,10 +141,10 @@ fisk show checkbook --sort asc
 future → pending → cleared → reconciled
 ```
 
-- **future** `○` — dated in the future, only visible in `forecast`
-- **pending** `·` — entered but not yet confirmed at the bank
-- **cleared** `✓` — confirmed/posted at the bank
-- **reconciled** `◆` — verified against bank statement
+- **future** — dated in the future, only visible in `forecast`
+- **pending** — entered but not yet confirmed at the bank
+- **cleared** — confirmed/posted at the bank
+- **reconciled** — verified against bank statement
 
 Transactions can go directly from pending to reconciled (skipping cleared).
 
