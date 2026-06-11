@@ -12,11 +12,13 @@ for arg in "$@"; do
       echo "Usage: ./install.sh [OPTIONS]"
       echo ""
       echo "Options:"
+      echo "  --update           Update binary only (skip data directory setup)"
       echo "  --no-data          Skip creating the data directory"
       echo "  --data-dir=PATH    Create data directory at PATH (sets FISK_DIR in shell rc)"
       echo "  --help             Show this help message"
       exit 0
       ;;
+    --update)       no_data=true ;;
     --no-data)      no_data=true ;;
     --data-dir=*)   DATA_DIR="${arg#*=}" ;;
   esac
@@ -36,7 +38,7 @@ fi
 
 # Create data directory
 if $no_data; then
-  echo "fisk installed to ~/.local/bin (skipped data directory setup)"
+  echo "fisk updated in ~/.local/bin"
   exit 0
 fi
 
