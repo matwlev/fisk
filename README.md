@@ -65,10 +65,11 @@ fisk> show
   savings
 
 fisk> show checkbook
-  #  Date        Description      Debit     Credit    Balance  Status
-  1  2026-06-11  Opening balance            4200.00   4200.00
-  2  2026-06-11  Electric bill    142.50               4057.50  ✓
-  3  2026-06-11  Paycheck                   3200.00   7257.50  ·
+     #  Date        Description                Debit      Credit      Balance  Status
+  ────  ──────────  ────────────────────  ──────────  ──────────  ───────────  ──────
+     1  2026-06-11  Opening balance                   $ 4,200.00  $  4,200.00
+     2  2026-06-11  Electric bill         $   142.50              $  4,057.50  ✓
+     3  2026-06-11  Paycheck                          $ 3,200.00  $  7,257.50  ·
 
 fisk> use checkbook
 checkbook> add
