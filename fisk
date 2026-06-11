@@ -16,6 +16,7 @@ from pathlib import Path
 
 DEFAULT_DIR = Path.home() / "fisk"
 FIELDNAMES = ["id", "date", "description", "amount", "category", "status", "notes"]
+BILL_FIELDNAMES = ["id", "name", "amount", "category", "frequency", "due_day", "start_date", "end_date", "paid_through"]
 
 
 def input_with_completion(prompt, options):
@@ -48,8 +49,8 @@ def find_config():
 
 
 def load_config():
-    """Load config. Returns dict with 'ledgers' mapping and 'defaults' list."""
-    config = {"ledgers": {}, "defaults": []}
+    """Load config. Returns dict with 'ledgers' mapping, 'bills' mapping, and 'defaults' list."""
+    config = {"ledgers": {}, "bills": {}, "defaults": []}
     config_file = find_config()
     if not config_file or not config_file.exists():
         return config
@@ -65,6 +66,10 @@ def load_config():
             parts = line.split(None, 1)
             if len(parts) == 2:
                 config["ledgers"][parts[0]] = str(Path(parts[1]).expanduser())
+        elif section == "bills":
+            parts = line.split(None, 1)
+            if len(parts) == 2:
+                config["bills"][parts[0]] = str(Path(parts[1]).expanduser())
         elif section == "defaults":
             config["defaults"].append(line)
     return config
@@ -106,9 +111,12 @@ def ledger_path(name):
 def list_ledgers():
     config = get_config()
     names = set(config["ledgers"].keys())
+    bill_paths = set(Path(p).resolve() for p in config.get("bills", {}).values())
     d = get_ledger_dir()
     if d.exists():
-        names.update(p.stem for p in d.glob("*.csv"))
+        for p in d.glob("*.csv"):
+            if p.resolve() not in bill_paths:
+                names.update([p.stem])
     return sorted(names)
 
 
@@ -160,6 +168,171 @@ def write_ledger(name, rows):
         w = csv.DictWriter(f, fieldnames=FIELDNAMES)
         w.writeheader()
         w.writerows(rows)
+
+
+# --- Bills ---
+
+def list_bill_files():
+    config = get_config()
+    return sorted(config["bills"].keys())
+
+
+def bill_file_path(name):
+    config = get_config()
+    if name in config["bills"]:
+        return Path(config["bills"][name])
+    return get_ledger_dir() / f"{name}.csv"
+
+
+def read_bills(name):
+    path = bill_file_path(name)
+    if not path.exists():
+        print(f"Bill file '{name}' not found.")
+        return None
+    with open(path, newline="") as f:
+        rows = list(csv.DictReader(f))
+        for r in rows:
+            for field in BILL_FIELDNAMES:
+                if field not in r:
+                    r[field] = ""
+        return rows
+
+
+def write_bills(name, rows):
+    path = bill_file_path(name)
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=BILL_FIELDNAMES)
+        w.writeheader()
+        w.writerows(rows)
+
+
+def next_bill_id(rows):
+    if not rows:
+        return 1
+    return max(int(r["id"]) for r in rows) + 1
+
+
+def add_month(d, months):
+    """Add months to a date, clamping day to valid range."""
+    m = d.month - 1 + months
+    year = d.year + m // 12
+    month = m % 12 + 1
+    import calendar
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def generate_due_dates(bill, start, end):
+    """Generate due dates for a bill within [start, end]."""
+    freq = bill["frequency"]
+    start_date = date.fromisoformat(bill["start_date"])
+    end_date = date.fromisoformat(bill["end_date"]) if bill["end_date"] else None
+    due_day = int(bill["due_day"]) if bill["due_day"] else None
+
+    dates = []
+    # Interval-based frequencies (e.g. "14d", "30d")
+    m = re.match(r"^(\d+)d$", freq)
+    if m:
+        interval = int(m.group(1))
+        current = start_date
+        while current <= end:
+            if current >= start and (not end_date or current <= end_date):
+                dates.append(current)
+            current += timedelta(days=interval)
+        return dates
+
+    # Calendar-based frequencies
+    month_intervals = {
+        "monthly": 1, "bimonthly": 2, "quarterly": 3,
+        "semiannual": 6, "annual": 12,
+    }
+    interval = month_intervals.get(freq)
+    if not interval:
+        return dates
+
+    import calendar
+    # Generate from start_date forward
+    current = start_date
+    if due_day:
+        # Anchor to due_day in the start month
+        day = min(due_day, calendar.monthrange(current.year, current.month)[1])
+        current = date(current.year, current.month, day)
+        if current < start_date:
+            current = add_month(current, interval)
+            day = min(due_day, calendar.monthrange(current.year, current.month)[1])
+            current = date(current.year, current.month, day)
+
+    while current <= end:
+        if current >= start and (not end_date or current <= end_date):
+            dates.append(current)
+        current = add_month(current, interval)
+        if due_day:
+            import calendar
+            day = min(due_day, calendar.monthrange(current.year, current.month)[1])
+            current = date(current.year, current.month, day)
+    return dates
+
+
+def get_next_due(bill):
+    """Get next unpaid due date for a bill."""
+    paid_through = date.fromisoformat(bill["paid_through"]) if bill["paid_through"] else None
+    start = paid_through + timedelta(days=1) if paid_through else date.fromisoformat(bill["start_date"])
+    end = date.today() + timedelta(days=365)
+    dates = generate_due_dates(bill, start, end)
+    return dates[0] if dates else None
+
+
+def get_upcoming_bills(window_days=30):
+    """Get all upcoming bills across all bill files within window."""
+    upcoming = []
+    today = date.today()
+    end = today + timedelta(days=window_days)
+    for bf_name in list_bill_files():
+        bills = read_bills(bf_name)
+        if not bills:
+            continue
+        for bill in bills:
+            paid_through = date.fromisoformat(bill["paid_through"]) if bill["paid_through"] else None
+            start = paid_through + timedelta(days=1) if paid_through else date.fromisoformat(bill["start_date"])
+            # Show unpaid bills due up to end of window
+            dates = generate_due_dates(bill, start, end)
+            for d in dates:
+                status = "paid" if (paid_through and d <= paid_through) else "unpaid"
+                upcoming.append({
+                    "name": bill["name"],
+                    "amount": bill["amount"],
+                    "due": d,
+                    "status": status,
+                    "source": bf_name,
+                })
+    upcoming.sort(key=lambda x: x["due"])
+    return upcoming
+
+
+def find_likely_match(bill, due_date):
+    """Search ledgers for a transaction that likely matches this bill payment."""
+    target_amt = Decimal(bill["amount"])
+    target_name = bill["name"].lower()
+    window = timedelta(days=15)
+    best = None
+    for ledger_name in list_ledgers():
+        rows = read_ledger(ledger_name)
+        if not rows:
+            continue
+        for r in rows:
+            desc = r["description"].lower()
+            if target_name not in desc and desc not in target_name:
+                continue
+            rd = date.fromisoformat(r["date"])
+            if abs((rd - due_date).days) > window.days:
+                continue
+            amt = abs(Decimal(r["amount"]))
+            if amt == target_amt or abs(amt - target_amt) <= target_amt * Decimal("0.1"):
+                if best is None or abs((rd - due_date).days) < abs((best["rd"] - due_date).days):
+                    best = {"ledger": ledger_name, "id": r["id"], "desc": r["description"], "date": r["date"], "rd": rd}
+    if best:
+        return f"{best['ledger']} #{best['id']} \"{best['desc']}\" {best['date']}"
+    return None
 
 
 def next_id(rows):
@@ -313,11 +486,25 @@ def cmd_create(args):
 def cmd_show(args):
     if not args.ledger:
         ledgers = list_ledgers()
-        if not ledgers:
-            print("No ledgers. Use 'create <name>' to create one.")
-        else:
+        bill_files = list_bill_files()
+        if ledgers:
+            print("  Ledgers")
+            print(f"  {'─'*16}")
             for l in ledgers:
                 print(f"  {l}")
+        else:
+            print("No ledgers. Use 'create <name>' to create one.")
+        if bill_files:
+            upcoming = get_upcoming_bills(30)
+            unpaid = [b for b in upcoming if b["status"] == "unpaid"]
+            if unpaid:
+                show_source = args.source if hasattr(args, "source") else False
+                print(f"\n  Bills (next 30 days)")
+                print(f"  {'─'*56}")
+                for b in unpaid:
+                    due_str = b["due"].strftime("%b %d")
+                    source_str = f"  [{b['source']}]" if show_source else ""
+                    print(f"  {b['name']:<18} $ {Decimal(b['amount']):>9,.2f}  due {due_str:<8} {b['status']}{source_str}")
         return
     rows = read_ledger(args.ledger)
     if rows is None:
@@ -410,11 +597,29 @@ class FiskRepl(cmd.Cmd):
         self._last_show = None  # stores params for pagination
 
     def do_show(self, line):
-        """show [ledger] [--start-date DATE] [--end-date DATE] [--status STATUS]"""
+        """show [ledger] [--start-date DATE] [--end-date DATE] [--status STATUS] [--source]"""
         parts = line.split()
         if not parts:
-            for l in list_ledgers():
-                print(f"  {l}")
+            # Dashboard: ledgers + upcoming bills
+            ledgers = list_ledgers()
+            if ledgers:
+                print("  Ledgers")
+                print(f"  {'─'*16}")
+                for l in ledgers:
+                    print(f"  {l}")
+            else:
+                print("  No ledgers.")
+
+            bill_files = list_bill_files()
+            if bill_files:
+                upcoming = get_upcoming_bills(30)
+                unpaid = [b for b in upcoming if b["status"] == "unpaid"]
+                if unpaid:
+                    print(f"\n  Bills (next 30 days)")
+                    print(f"  {'─'*56}")
+                    for b in unpaid:
+                        due_str = b["due"].strftime("%b %d")
+                        print(f"  {b['name']:<18} $ {Decimal(b['amount']):>9,.2f}  due {due_str:<8} {b['status']}")
             return
         if parts[0] == "next":
             self.do_next(" ".join(parts[1:]))
@@ -562,15 +767,37 @@ class FiskRepl(cmd.Cmd):
         print(f"Created: {path}")
 
     def do_use(self, line):
-        """use <ledger> - enter interactive mode for a ledger"""
+        """use <ledger> - enter interactive mode for a ledger (alias for 'ledgers')"""
+        self.do_ledgers(line)
+
+    def do_ledgers(self, line):
+        """ledgers <name> - enter interactive mode for a ledger"""
         name = line.strip()
         if not name:
-            print("Usage: use <name>")
+            for l in list_ledgers():
+                print(f"  {l}")
             return
         if not ledger_path(name).exists():
             print(f"Ledger '{name}' not found.")
             return
         LedgerRepl(name).cmdloop()
+
+    def do_bills(self, line):
+        """bills [name] [--source] - enter bills context or show upcoming"""
+        parts = line.split()
+        if not parts:
+            bill_files = list_bill_files()
+            if not bill_files:
+                print("  No bill files configured. Add a [bills] section to config.")
+            else:
+                for b in bill_files:
+                    print(f"  {b}")
+            return
+        name = parts[0]
+        if not bill_file_path(name).exists():
+            print(f"Bill file '{name}' not found.")
+            return
+        BillsRepl(name).cmdloop()
 
     def do_quit(self, line):
         """Exit fisk"""
@@ -1046,6 +1273,209 @@ class LedgerRepl(cmd.Cmd):
     do_EOF = do_back
 
 
+class BillsRepl(cmd.Cmd):
+    def __init__(self, name):
+        super().__init__()
+        self.name = name
+        self.prompt = f"{name}> "
+
+    def do_show(self, line):
+        """show [--source] - show upcoming bills"""
+        parts = line.split()
+        show_source = "--source" in parts
+        bills = read_bills(self.name)
+        if not bills:
+            print("  No bills.")
+            return
+        today = date.today()
+        end = today + timedelta(days=90)
+        print(f"  {'Bill':<18} {'Amount':>10}  {'Due':<10}  {'Status':<8}  {'Likely match'}")
+        print(f"  {'─'*18} {'─'*10}  {'─'*10}  {'─'*8}  {'─'*30}")
+        for bill in bills:
+            next_due = get_next_due(bill)
+            if not next_due or next_due > end:
+                status = "done" if bill["end_date"] and date.fromisoformat(bill["end_date"]) < today else "—"
+                print(f"  {bill['name']:<18} $ {Decimal(bill['amount']):>8,.2f}  {'—':<10}  {status:<8}")
+                continue
+            status = "unpaid"
+            match = find_likely_match(bill, next_due)
+            match_str = match or ""
+            print(f"  {bill['name']:<18} $ {Decimal(bill['amount']):>8,.2f}  {next_due.strftime('%b %d'):<10}  {status:<8}  {match_str}")
+
+    def do_add(self, line):
+        """add - add a new recurring bill"""
+        bills = read_bills(self.name)
+        if bills is None:
+            bills = []
+        try:
+            name = input("  Name: ").strip()
+            if not name:
+                print("  Cancelled.")
+                return
+            amount = input("  Amount: ").strip()
+            Decimal(amount)
+            category = input("  Category []: ").strip()
+            print("  Frequency (monthly, bimonthly, quarterly, semiannual, annual, or Nd e.g. 14d):")
+            frequency = input("  Frequency: ").strip()
+            due_day = ""
+            if frequency in ("monthly", "bimonthly", "quarterly", "semiannual", "annual"):
+                due_day = input("  Due day of month: ").strip()
+            start_date = input(f"  Start date [{date.today().isoformat()}]: ").strip() or date.today().isoformat()
+            end_date = input("  End date (blank for ongoing): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
+            return
+        except InvalidOperation:
+            print("  Invalid amount.")
+            return
+        bills.append({
+            "id": str(next_bill_id(bills)),
+            "name": name,
+            "amount": amount,
+            "category": category,
+            "frequency": frequency,
+            "due_day": due_day,
+            "start_date": start_date,
+            "end_date": end_date,
+            "paid_through": "",
+        })
+        write_bills(self.name, bills)
+        print("  Added.")
+
+    def do_pay(self, line):
+        """pay <name> [--add <ledger>] - mark a bill as paid"""
+        parts = line.split()
+        if not parts:
+            print("Usage: pay <bill name> [--add <ledger>]")
+            return
+        # Parse --add flag
+        add_ledger = None
+        bill_name_parts = []
+        i = 0
+        while i < len(parts):
+            if parts[i] == "--add" and i + 1 < len(parts):
+                add_ledger = parts[i + 1]
+                i += 2
+            else:
+                bill_name_parts.append(parts[i])
+                i += 1
+        bill_name = " ".join(bill_name_parts)
+
+        bills = read_bills(self.name)
+        if not bills:
+            return
+        bill = next((b for b in bills if b["name"].lower() == bill_name.lower()), None)
+        if not bill:
+            print(f"  Bill '{bill_name}' not found.")
+            return
+        next_due = get_next_due(bill)
+        if not next_due:
+            print(f"  No upcoming due date for '{bill_name}'.")
+            return
+        match = find_likely_match(bill, next_due)
+        if match:
+            print(f"  Likely match: {match}")
+        else:
+            print(f"  No matching transaction found.")
+        try:
+            confirm = input(f"  Mark paid through {next_due}? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
+            return
+        if confirm and confirm != "y":
+            print("  Cancelled.")
+            return
+        # Optionally add transaction to ledger
+        if add_ledger:
+            ledger_rows = read_ledger(add_ledger)
+            if ledger_rows is None:
+                print(f"  Ledger '{add_ledger}' not found. Bill not marked paid.")
+                return
+            ledger_rows.append({
+                "id": str(next_id(ledger_rows)),
+                "date": date.today().isoformat(),
+                "description": bill["name"],
+                "amount": str(-abs(Decimal(bill["amount"]))),
+                "category": bill["category"],
+                "status": "pending",
+                "notes": "",
+            })
+            write_ledger(add_ledger, ledger_rows)
+            print(f"  ✓ Transaction added to {add_ledger} (#{ledger_rows[-1]['id']})")
+        bill["paid_through"] = next_due.isoformat()
+        write_bills(self.name, bills)
+        print(f"  ✓ {bill['name']} paid through {next_due}")
+
+    def do_edit(self, line):
+        """edit <id> - edit a bill"""
+        tid = line.strip()
+        if not tid:
+            print("Usage: edit <id>")
+            return
+        bills = read_bills(self.name)
+        if not bills:
+            return
+        bill = next((b for b in bills if b["id"] == tid), None)
+        if not bill:
+            print(f"  Bill {tid} not found.")
+            return
+        try:
+            bill["name"] = input(f"  Name [{bill['name']}]: ").strip() or bill["name"]
+            amt = input(f"  Amount [{bill['amount']}]: ").strip()
+            if amt:
+                Decimal(amt)
+                bill["amount"] = amt
+            bill["category"] = input(f"  Category [{bill['category']}]: ").strip() or bill["category"]
+            bill["frequency"] = input(f"  Frequency [{bill['frequency']}]: ").strip() or bill["frequency"]
+            bill["due_day"] = input(f"  Due day [{bill['due_day']}]: ").strip() or bill["due_day"]
+            bill["start_date"] = input(f"  Start date [{bill['start_date']}]: ").strip() or bill["start_date"]
+            bill["end_date"] = input(f"  End date [{bill['end_date']}]: ").strip() or bill["end_date"]
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
+            return
+        except InvalidOperation:
+            print("  Invalid amount.")
+            return
+        write_bills(self.name, bills)
+        print("  Updated.")
+
+    def do_remove(self, line):
+        """remove <id> - remove a bill"""
+        tid = line.strip()
+        if not tid:
+            print("Usage: remove <id>")
+            return
+        bills = read_bills(self.name)
+        if not bills:
+            return
+        bill = next((b for b in bills if b["id"] == tid), None)
+        if not bill:
+            print(f"  Bill {tid} not found.")
+            return
+        print(f"  {bill['name']}  ${Decimal(bill['amount']):,.2f}  {bill['frequency']}")
+        try:
+            confirm = input("  Remove? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
+            return
+        if confirm != "y":
+            print("  Cancelled.")
+            return
+        bills = [b for b in bills if b["id"] != tid]
+        write_bills(self.name, bills)
+        print("  Removed.")
+
+    def do_back(self, line):
+        """Return to fisk prompt"""
+        return True
+
+    def do_quit(self, line):
+        """Exit fisk entirely"""
+        sys.exit(0)
+
+    do_EOF = do_back
+
+
 def cmd_import(args):
     """Import transactions from an external CSV file."""
     name = args.ledger
@@ -1258,6 +1688,85 @@ def cmd_summary(args):
 
 # --- Main ---
 
+def cmd_bills(args):
+    """Handle non-interactive bills command."""
+    if not args.bill_file:
+        # List bill files
+        bill_files = list_bill_files()
+        if not bill_files:
+            print("No bill files configured. Add a [bills] section to config.")
+        else:
+            for b in bill_files:
+                print(f"  {b}")
+        return
+
+    if not args.action or args.action == "show":
+        # Show upcoming bills from this file
+        bills = read_bills(args.bill_file)
+        if not bills:
+            return
+        today = date.today()
+        end = today + timedelta(days=90)
+        show_source = args.source if hasattr(args, "source") else False
+        print(f"  {'Bill':<18} {'Amount':>10}  {'Due':<10}  {'Status':<8}  {'Likely match'}")
+        print(f"  {'─'*18} {'─'*10}  {'─'*10}  {'─'*8}  {'─'*30}")
+        for bill in bills:
+            next_due = get_next_due(bill)
+            if not next_due or next_due > end:
+                continue
+            match = find_likely_match(bill, next_due)
+            match_str = match or ""
+            source_str = f"  [{args.bill_file}]" if show_source else ""
+            print(f"  {bill['name']:<18} $ {Decimal(bill['amount']):>8,.2f}  {next_due.strftime('%b %d'):<10}  unpaid    {match_str}{source_str}")
+
+    elif args.action == "pay":
+        if not args.bill_name:
+            print("Usage: fisk bills <file> pay <bill name> [--add <ledger>]")
+            return
+        bills = read_bills(args.bill_file)
+        if not bills:
+            return
+        bill = next((b for b in bills if b["name"].lower() == args.bill_name.lower()), None)
+        if not bill:
+            print(f"  Bill '{args.bill_name}' not found.")
+            return
+        next_due = get_next_due(bill)
+        if not next_due:
+            print(f"  No upcoming due date for '{args.bill_name}'.")
+            return
+        match = find_likely_match(bill, next_due)
+        if match:
+            print(f"  Likely match: {match}")
+        else:
+            print(f"  No matching transaction found.")
+        try:
+            confirm = input(f"  Mark paid through {next_due}? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
+            return
+        if confirm and confirm != "y":
+            print("  Cancelled.")
+            return
+        if args.add_ledger:
+            ledger_rows = read_ledger(args.add_ledger)
+            if ledger_rows is None:
+                return
+            ledger_rows.append({
+                "id": str(next_id(ledger_rows)),
+                "date": date.today().isoformat(),
+                "description": bill["name"],
+                "amount": str(-abs(Decimal(bill["amount"]))),
+                "category": bill["category"],
+                "status": "pending",
+                "notes": "",
+            })
+            write_ledger(args.add_ledger, ledger_rows)
+            print(f"  ✓ Transaction added to {args.add_ledger} (#{ledger_rows[-1]['id']})")
+        bill["paid_through"] = next_due.isoformat()
+        write_bills(args.bill_file, bills)
+        print(f"  ✓ {bill['name']} paid through {next_due}")
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="fisk",
@@ -1280,6 +1789,7 @@ def build_parser():
     p.add_argument("--sort", choices=["asc", "desc"], default="desc", help="Sort order: asc or desc (default: desc)")
     p.add_argument("--limit", type=int, help="Maximum number of transactions to display")
     p.add_argument("--amount", help="Filter by amount (e.g. '>=100', '<50', '=25.00')")
+    p.add_argument("--source", action="store_true", help="Show source file for each bill")
 
     p = sub.add_parser("forecast", help="Show ledger including future transactions")
     p.add_argument("ledger", help="Ledger to forecast")
@@ -1329,6 +1839,13 @@ def build_parser():
     p.add_argument("--start-date", help="Include transactions from this date")
     p.add_argument("--end-date", help="Include transactions through this date")
 
+    p = sub.add_parser("bills", help="Manage recurring bills")
+    p.add_argument("bill_file", nargs="?", help="Bill file name")
+    p.add_argument("action", nargs="?", choices=["show", "pay"], help="Action: show or pay")
+    p.add_argument("bill_name", nargs="?", help="Bill name (for pay)")
+    p.add_argument("--add", dest="add_ledger", help="Also add transaction to this ledger (for pay)")
+    p.add_argument("--source", action="store_true", help="Show source file for each bill")
+
     return parser
 
 
@@ -1358,6 +1875,8 @@ def main():
         cmd_sort_noninteractive(args)
     elif args.command == "summary":
         cmd_summary(args)
+    elif args.command == "bills":
+        cmd_bills(args)
     else:
         parser.print_help()
 
