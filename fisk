@@ -149,6 +149,33 @@ def add_ledger_to_config(name, path, config_file=None):
     _config = None
 
 
+def add_bills_to_config(name, path, config_file=None):
+    """Add a bills entry to the active config file."""
+    if config_file is None:
+        config_file = find_config()
+    if not config_file or not Path(config_file).exists():
+        return
+    config_file = Path(config_file)
+    abs_path = str(Path(path).resolve())
+    lines = config_file.read_text().splitlines()
+    inserted = False
+    for i, line in enumerate(lines):
+        if line.strip() == "[bills]":
+            j = i + 1
+            while j < len(lines) and not lines[j].strip().startswith("[") and lines[j].strip() != "":
+                j += 1
+            lines.insert(j, f"{name}  {abs_path}")
+            inserted = True
+            break
+    if not inserted:
+        lines.append("")
+        lines.append("[bills]")
+        lines.append(f"{name}  {abs_path}")
+    config_file.write_text("\n".join(lines) + "\n")
+    global _config
+    _config = None
+
+
 def read_ledger(name):
     path = ledger_path(name)
     if not path.exists():
@@ -306,9 +333,11 @@ def get_upcoming_bills(window_days=30):
             dates = generate_due_dates(bill, start, end)
             for d in dates:
                 status = "paid" if (paid_through and d <= paid_through) else "unpaid"
+                amt, is_estimate = get_bill_amount(bill)
                 upcoming.append({
                     "name": bill["name"],
-                    "amount": bill["amount"],
+                    "amount": amt,
+                    "is_estimate": is_estimate,
                     "due": d,
                     "status": status,
                     "source": bf_name,
@@ -319,7 +348,7 @@ def get_upcoming_bills(window_days=30):
 
 def find_likely_match(bill, due_date):
     """Search ledgers for a transaction that likely matches this bill payment."""
-    target_amt = Decimal(bill["amount"])
+    target_amt = Decimal(bill["amount"]) if bill["amount"] else None
     target_name = bill["name"].lower()
     window = timedelta(days=15)
     best = None
@@ -335,11 +364,66 @@ def find_likely_match(bill, due_date):
             if abs((rd - due_date).days) > window.days:
                 continue
             amt = abs(Decimal(r["amount"]))
-            if amt == target_amt or abs(amt - target_amt) <= target_amt * Decimal("0.1"):
+            if target_amt is None or amt == target_amt or abs(amt - target_amt) <= target_amt * Decimal("0.1"):
                 if best is None or abs((rd - due_date).days) < abs((best["rd"] - due_date).days):
                     best = {"ledger": ledger_name, "id": r["id"], "desc": r["description"], "date": r["date"], "rd": rd}
     if best:
         return f"{best['ledger']} #{best['id']} \"{best['desc']}\" {best['date']}"
+    return None
+
+
+def estimate_bill_amount(bill):
+    """Estimate a bill's amount from the last 6 matching ledger transactions."""
+    target_name = bill["name"].lower()
+    matches = []
+    for ledger_name in list_ledgers():
+        rows = read_ledger(ledger_name)
+        if not rows:
+            continue
+        for r in rows:
+            desc = r["description"].lower()
+            if target_name in desc or desc in target_name:
+                matches.append((r["date"], abs(Decimal(r["amount"]))))
+    if not matches:
+        return None
+    matches.sort(key=lambda x: x[0], reverse=True)
+    recent = [amt for _, amt in matches[:6]]
+    return sum(recent) / len(recent)
+
+
+def get_bill_amount(bill):
+    """Get bill amount or estimate. Returns (amount, is_estimate) tuple."""
+    if bill["amount"]:
+        return Decimal(bill["amount"]), False
+    est = estimate_bill_amount(bill)
+    if est:
+        return est, True
+    return None, True
+
+
+def find_matching_transaction(bill, due_date, ledger_name):
+    """Find an existing transaction in a specific ledger that matches this bill payment."""
+    target_name = bill["name"].lower()
+    target_amt = Decimal(bill["amount"]) if bill["amount"] else None
+    window = timedelta(days=15)
+    rows = read_ledger(ledger_name)
+    if not rows:
+        return None
+    best = None
+    for r in rows:
+        desc = r["description"].lower()
+        if target_name not in desc and desc not in target_name:
+            continue
+        rd = date.fromisoformat(r["date"])
+        if abs((rd - due_date).days) > window.days:
+            continue
+        amt = abs(Decimal(r["amount"]))
+        if target_amt and not (amt == target_amt or abs(amt - target_amt) <= target_amt * Decimal("0.1")):
+            continue
+        if best is None or abs((rd - due_date).days) < abs(best["days"]):
+            best = {"id": r["id"], "desc": r["description"], "date": r["date"], "amount": r["amount"], "status": r["status"], "days": (rd - due_date).days}
+    if best:
+        return {"id": best["id"], "desc": best["desc"], "date": best["date"], "amount": best["amount"], "status": best["status"]}
     return None
 
 
@@ -512,7 +596,11 @@ def cmd_show(args):
                 for b in unpaid:
                     due_str = b["due"].strftime("%b %d")
                     source_str = f"  [{b['source']}]" if show_source else ""
-                    print(f"  {b['name']:<18} $ {Decimal(b['amount']):>9,.2f}  due {due_str:<8} {b['status']}{source_str}")
+                    if b["amount"] is not None:
+                        prefix = "~$" if b["is_estimate"] else " $"
+                        print(f"  {b['name']:<18} {prefix}{b['amount']:>9,.2f}  due {due_str:<8} {b['status']}{source_str}")
+                    else:
+                        print(f"  {b['name']:<18} {'':>11}  due {due_str:<8} {b['status']}{source_str}")
         return
     rows = read_ledger(args.ledger)
     if rows is None:
@@ -627,7 +715,11 @@ class FiskRepl(cmd.Cmd):
                     print(f"  {'─'*56}")
                     for b in unpaid:
                         due_str = b["due"].strftime("%b %d")
-                        print(f"  {b['name']:<18} $ {Decimal(b['amount']):>9,.2f}  due {due_str:<8} {b['status']}")
+                        if b["amount"] is not None:
+                            prefix = "~$" if b["is_estimate"] else " $"
+                            print(f"  {b['name']:<18} {prefix}{b['amount']:>9,.2f}  due {due_str:<8} {b['status']}")
+                        else:
+                            print(f"  {b['name']:<18} {'':>11}  due {due_str:<8} {b['status']}")
             return
         if parts[0] == "next":
             self.do_next(" ".join(parts[1:]))
@@ -1300,15 +1392,22 @@ class BillsRepl(cmd.Cmd):
         print(f"  {'Bill':<18} {'Amount':>10}  {'Due':<10}  {'Status':<8}  {'Likely match'}")
         print(f"  {'─'*18} {'─'*10}  {'─'*10}  {'─'*8}  {'─'*30}")
         for bill in bills:
+            amt, is_estimate = get_bill_amount(bill)
+            amt_str = ""
+            if amt is not None:
+                prefix = "~$" if is_estimate else " $"
+                amt_str = f"{prefix}{amt:>8,.2f}"
+            else:
+                amt_str = f" {'':>9}"
             next_due = get_next_due(bill)
             if not next_due or next_due > end:
                 status = "done" if bill["end_date"] and date.fromisoformat(bill["end_date"]) < today else "—"
-                print(f"  {bill['name']:<18} $ {Decimal(bill['amount']):>8,.2f}  {'—':<10}  {status:<8}")
+                print(f"  {bill['name']:<18} {amt_str}  {'—':<10}  {status:<8}")
                 continue
             status = "unpaid"
             match = find_likely_match(bill, next_due)
             match_str = match or ""
-            print(f"  {bill['name']:<18} $ {Decimal(bill['amount']):>8,.2f}  {next_due.strftime('%b %d'):<10}  {status:<8}  {match_str}")
+            print(f"  {bill['name']:<18} {amt_str}  {next_due.strftime('%b %d'):<10}  {status:<8}  {match_str}")
 
     def do_add(self, line):
         """add - add a new recurring bill"""
@@ -1399,17 +1498,47 @@ class BillsRepl(cmd.Cmd):
             if ledger_rows is None:
                 print(f"  Ledger '{add_ledger}' not found. Bill not marked paid.")
                 return
-            ledger_rows.append({
-                "id": str(next_id(ledger_rows)),
-                "date": date.today().isoformat(),
-                "description": bill["name"],
-                "amount": str(-abs(Decimal(bill["amount"]))),
-                "category": bill["category"],
-                "status": "pending",
-                "notes": "",
-            })
-            write_ledger(add_ledger, ledger_rows)
-            print(f"  ✓ Transaction added to {add_ledger} (#{ledger_rows[-1]['id']})")
+            # Look for existing matching transaction
+            existing = find_matching_transaction(bill, next_due, add_ledger)
+            if existing:
+                # Transaction already exists — just update its status
+                for r in ledger_rows:
+                    if r["id"] == existing["id"] and r["status"] == "future":
+                        r["status"] = "pending"
+                        write_ledger(add_ledger, ledger_rows)
+                        print(f"  ✓ {add_ledger} #{r['id']} marked pending")
+                        break
+                else:
+                    print(f"  ✓ Matched {add_ledger} #{existing['id']}")
+            else:
+                # No match — prompt for amount and create transaction
+                amt, is_estimate = get_bill_amount(bill)
+                if amt is None:
+                    try:
+                        amt_input = input("  Amount: ").strip()
+                        amt = Decimal(amt_input)
+                    except (EOFError, KeyboardInterrupt, InvalidOperation):
+                        print("\n  Cancelled.")
+                        return
+                elif is_estimate:
+                    try:
+                        amt_input = input(f"  Amount [~{amt:.2f}]: ").strip()
+                        if amt_input:
+                            amt = Decimal(amt_input)
+                    except (EOFError, KeyboardInterrupt, InvalidOperation):
+                        print("\n  Cancelled.")
+                        return
+                ledger_rows.append({
+                    "id": str(next_id(ledger_rows)),
+                    "date": date.today().isoformat(),
+                    "description": bill["name"],
+                    "amount": str(-abs(amt)),
+                    "category": bill["category"],
+                    "status": "pending",
+                    "notes": "",
+                })
+                write_ledger(add_ledger, ledger_rows)
+                print(f"  ✓ Transaction added to {add_ledger} (#{ledger_rows[-1]['id']})")
         bill["paid_through"] = next_due.isoformat()
         write_bills(self.name, bills)
         print(f"  ✓ {bill['name']} paid through {next_due}")
@@ -1460,7 +1589,8 @@ class BillsRepl(cmd.Cmd):
         if not bill:
             print(f"  Bill {tid} not found.")
             return
-        print(f"  {bill['name']}  ${Decimal(bill['amount']):,.2f}  {bill['frequency']}")
+        amt_str = f"${Decimal(bill['amount']):,.2f}" if bill["amount"] else "(no amount)"
+        print(f"  {bill['name']}  {amt_str}  {bill['frequency']}")
         try:
             confirm = input("  Remove? [y/N]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -1708,6 +1838,27 @@ def cmd_bills(args):
                 print(f"  {b}")
         return
 
+    # Handle: fisk bills create <name> [--path PATH]
+    if args.bill_file == "create":
+        name = args.action  # positional shift: 'create' ate bill_file, name lands in action
+        if not name:
+            print("Usage: fisk bills create <name> [--path PATH]")
+            return
+        if args.bill_path:
+            path = Path(args.bill_path).expanduser()
+            path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            path = get_ledger_dir() / f"{name}.csv"
+        if path.exists():
+            print(f"Bill file '{name}' already exists at {path}.")
+            return
+        with open(path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=BILL_FIELDNAMES)
+            w.writeheader()
+        add_bills_to_config(name, str(path))
+        print(f"Created: {path}")
+        return
+
     if not args.action or args.action == "show":
         # Show upcoming bills from this file
         bills = read_bills(args.bill_file)
@@ -1722,10 +1873,15 @@ def cmd_bills(args):
             next_due = get_next_due(bill)
             if not next_due or next_due > end:
                 continue
+            amt, is_estimate = get_bill_amount(bill)
             match = find_likely_match(bill, next_due)
             match_str = match or ""
             source_str = f"  [{args.bill_file}]" if show_source else ""
-            print(f"  {bill['name']:<18} $ {Decimal(bill['amount']):>8,.2f}  {next_due.strftime('%b %d'):<10}  unpaid    {match_str}{source_str}")
+            if amt is not None:
+                prefix = "~$" if is_estimate else " $"
+                print(f"  {bill['name']:<18} {prefix}{amt:>8,.2f}  {next_due.strftime('%b %d'):<10}  unpaid    {match_str}{source_str}")
+            else:
+                print(f"  {bill['name']:<18} {'':>10}  {next_due.strftime('%b %d'):<10}  unpaid    {match_str}{source_str}")
 
     elif args.action == "pay":
         if not args.bill_name:
@@ -1759,17 +1915,44 @@ def cmd_bills(args):
             ledger_rows = read_ledger(args.add_ledger)
             if ledger_rows is None:
                 return
-            ledger_rows.append({
-                "id": str(next_id(ledger_rows)),
-                "date": date.today().isoformat(),
-                "description": bill["name"],
-                "amount": str(-abs(Decimal(bill["amount"]))),
-                "category": bill["category"],
-                "status": "pending",
-                "notes": "",
-            })
-            write_ledger(args.add_ledger, ledger_rows)
-            print(f"  ✓ Transaction added to {args.add_ledger} (#{ledger_rows[-1]['id']})")
+            existing = find_matching_transaction(bill, next_due, args.add_ledger)
+            if existing:
+                for r in ledger_rows:
+                    if r["id"] == existing["id"] and r["status"] == "future":
+                        r["status"] = "pending"
+                        write_ledger(args.add_ledger, ledger_rows)
+                        print(f"  ✓ {args.add_ledger} #{r['id']} marked pending")
+                        break
+                else:
+                    print(f"  ✓ Matched {args.add_ledger} #{existing['id']}")
+            else:
+                amt, is_estimate = get_bill_amount(bill)
+                if amt is None:
+                    try:
+                        amt_input = input("  Amount: ").strip()
+                        amt = Decimal(amt_input)
+                    except (EOFError, KeyboardInterrupt, InvalidOperation):
+                        print("\n  Cancelled.")
+                        return
+                elif is_estimate:
+                    try:
+                        amt_input = input(f"  Amount [~{amt:.2f}]: ").strip()
+                        if amt_input:
+                            amt = Decimal(amt_input)
+                    except (EOFError, KeyboardInterrupt, InvalidOperation):
+                        print("\n  Cancelled.")
+                        return
+                ledger_rows.append({
+                    "id": str(next_id(ledger_rows)),
+                    "date": date.today().isoformat(),
+                    "description": bill["name"],
+                    "amount": str(-abs(amt)),
+                    "category": bill["category"],
+                    "status": "pending",
+                    "notes": "",
+                })
+                write_ledger(args.add_ledger, ledger_rows)
+                print(f"  ✓ Transaction added to {args.add_ledger} (#{ledger_rows[-1]['id']})")
         bill["paid_through"] = next_due.isoformat()
         write_bills(args.bill_file, bills)
         print(f"  ✓ {bill['name']} paid through {next_due}")
@@ -1849,10 +2032,11 @@ def build_parser():
 
     p = sub.add_parser("bills", help="Manage recurring bills")
     p.add_argument("bill_file", nargs="?", help="Bill file name")
-    p.add_argument("action", nargs="?", choices=["show", "pay"], help="Action: show or pay")
-    p.add_argument("bill_name", nargs="?", help="Bill name (for pay)")
+    p.add_argument("action", nargs="?", help="Action: show, pay, or create")
+    p.add_argument("bill_name", nargs="?", help="Bill name (for pay) or file name (for create)")
     p.add_argument("--add", dest="add_ledger", help="Also add transaction to this ledger (for pay)")
     p.add_argument("--source", action="store_true", help="Show source file for each bill")
+    p.add_argument("--path", dest="bill_path", help="Path for the bills CSV file (for create)")
 
     return parser
 
