@@ -586,7 +586,7 @@ def next_id(rows):
 
 
 def parse_date_or_relative(val):
-    """Parse YYYY-MM-DD, 'today', or relative like +2w, +30d, +3m."""
+    """Parse YYYY-MM-DD, 'today', bare day (e.g. '12'), or relative like +2w, +30d, +3m."""
     if val == "today":
         return date.today()
     m = re.match(r"^\+(\d+)([dwm])$", val)
@@ -598,6 +598,14 @@ def parse_date_or_relative(val):
             return date.today() + timedelta(weeks=n)
         elif unit == "m":
             return add_month(date.today(), n)
+    # Bare day number (1-31) → current month/year
+    if re.match(r"^\d{1,2}$", val):
+        day = int(val)
+        import calendar
+        today = date.today()
+        max_day = calendar.monthrange(today.year, today.month)[1]
+        if 1 <= day <= max_day:
+            return date(today.year, today.month, day)
     return date.fromisoformat(val)
 
 
@@ -643,6 +651,13 @@ def validate_date(val):
         if val == "today" or re.match(r"^\+\d+[dwm]$", val):
             parse_date_or_relative(val)
             return val
+        # Bare day number
+        if re.match(r"^\d{1,2}$", val):
+            import calendar
+            day = int(val)
+            today = date.today()
+            max_day = calendar.monthrange(today.year, today.month)[1]
+            return val if 1 <= day <= max_day else None
         date.fromisoformat(val)
         return val
     except (ValueError, TypeError):
