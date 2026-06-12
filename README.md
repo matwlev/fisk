@@ -260,7 +260,9 @@ predicted → unpaid → paid
 
 ## Interactive Mode
 
-Run `fisk` with no arguments to enter the REPL:
+Run `fisk` with no arguments to enter the REPL. The interface has three tiers:
+
+### Top level (`fisk>`)
 
 ```
 $ fisk
@@ -272,77 +274,130 @@ fisk> show
 
   Bills (next 30 days)
   ────────────────────────────────────────────────────────
-  Electric          $   142.50  due Jun 15  unpaid
-  Netflix           $    15.99  due Jul 01  predicted
+  Electric          $   142.50  due Jun 15  unpaid      [bills]
+  Netflix           $    15.99  due Jul 01  predicted   [subscriptions]
 
-fisk> show checkbook
-     #  Date        Description                Debit      Credit      Balance  Status
-  ────  ──────────  ────────────────────  ──────────  ──────────  ───────────  ──────────
-     1  2026-06-11  Opening balance                   $ 4,200.00  $  4,200.00
-     2  2026-06-11  Electric bill         $   142.50              $  4,057.50  cleared
-     3  2026-06-11  Paycheck                          $ 3,200.00  $  7,257.50  pending
-
-fisk> ledgers checkbook
-checkbook> add
-checkbook> edit 3
-checkbook> clear 2
-checkbook> delete 4
-checkbook> back
-
-fisk> bills bills
-bills> show
-bills> add
-bills> receive Electric --due 2026-06-15 --amount 148.23
-bills> pay Electric --add checkbook
-bills> back
-
+fisk> ledgers
+fisk> bills
 fisk> quit
+```
+
+### Ledgers mode (`fisk (ledgers)>`)
+
+```
+fisk> ledgers
+fisk (ledgers)> show
+  checkbook
+  savings
+fisk (ledgers)> new
+  Name: checking
+  Opening balance [0.00]: 5000
+  Path [~/.fisk/checking.csv]:
+  Created.
+fisk (ledgers)> use checkbook
+fisk (ledger: checkbook)> ...
+fisk (ledger: checkbook)> back
+fisk (ledgers)> back
+```
+
+### Ledger context (`fisk (ledger: name)>`)
+
+```
+fisk (ledger: checkbook)> show
+fisk (ledger: checkbook)> debit
+fisk (ledger: checkbook)> credit
+fisk (ledger: checkbook)> add
+fisk (ledger: checkbook)> edit 3
+fisk (ledger: checkbook)> clear 2
+fisk (ledger: checkbook)> delete 4
+fisk (ledger: checkbook)> reconcile
+fisk (ledger: checkbook)> forecast -d +2w
+fisk (ledger: checkbook)> summary
+fisk (ledger: checkbook)> back
+```
+
+### Bills mode (`fisk (bills)>`)
+
+```
+fisk> bills
+fisk (bills)> show
+  monthly
+  subscriptions
+fisk (bills)> new
+  Name: subscriptions
+  Path [~/.fisk/subscriptions.csv]:
+  Created.
+fisk (bills)> pay Electric --add checkbook
+fisk (bills)> receive Netflix --due 2026-07-01 --amount 15.99
+fisk (bills)> use monthly
+fisk (bills: monthly)> ...
+fisk (bills: monthly)> back
+fisk (bills)> back
+```
+
+### Bill file context (`fisk (bills: name)>`)
+
+```
+fisk (bills: monthly)> show
+fisk (bills: monthly)> add
+fisk (bills: monthly)> receive Electric --due 15 --amount 148.23
+fisk (bills: monthly)> pay Electric --add checkbook
+fisk (bills: monthly)> back
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `create <name> [--balance AMT] [--path PATH] [--config FILE]` | Create a new ledger |
-| `show [--source]` | List all ledgers and upcoming bills |
-| `show <name> [--start-date] [--end-date] [--status] [--sort] [--limit] [--amount]` | Display a ledger |
-| `forecast <name> -d <date\|duration> [--sort] [--limit] [--amount]` | Show including future transactions |
-| `add <name> --desc "..." --amount N [--date] [--category]` | Add a transaction |
-| `clear <name> <id> [id...]` | Mark transactions as cleared |
-| `delete <name> <id> [id...]` | Delete transactions (with confirmation) |
-| `import <name> --file <path>` | Import from an external CSV |
-| `sort <name>` | Sort all transactions by date (reassigns IDs) |
-| `sort <name> <id> <position>` | Move a transaction to a position |
-| `summary <name> [--description] [--category] [--start-date] [--end-date]` | Transaction statistics and top-10 breakdowns |
-| `bills` | List bill files |
-| `bills create <name> [--path PATH]` | Create a new bill file |
+| `create ledger --name NAME [--balance AMT] [--path PATH]` | Create a new ledger |
+| `create bills --name NAME [--path PATH]` | Create a new bill file |
+| `show <ledger> [--start-date] [--end-date] [--status] [--sort] [--limit] [--amount]` | Display a ledger |
+| `forecast <ledger> -d <date\|duration> [--sort] [--limit] [--amount]` | Show including future transactions |
+| `add <ledger> --desc "..." --amount N [--date] [--category]` | Add a transaction |
+| `add <ledger> --desc "..." --debit N [--date] [--category]` | Add a debit (stored negative) |
+| `add <ledger> --desc "..." --credit N [--date] [--category]` | Add a credit (stored positive) |
+| `clear <ledger> <id> [id...]` | Mark transactions as cleared |
+| `delete <ledger> <id> [id...]` | Delete transactions (with confirmation) |
+| `import <ledger> --file <path>` | Import from an external CSV |
+| `sort <ledger>` | Sort all transactions by date (reassigns IDs) |
+| `sort <ledger> <id> <position>` | Move a transaction to a position |
+| `summary <ledger> [--description] [--category] [--start-date] [--end-date]` | Transaction statistics |
 | `bills <file> [show]` | Show upcoming bills from a file |
-| `bills <file> pay <name> [--add <ledger>]` | Mark a bill as paid (optionally add transaction) |
+| `bills <file> pay <name> [--add <ledger>]` | Mark a bill as paid |
 | `bills <file> receive <name> [--due DATE] [--amount AMT]` | Record a bill statement received |
-| `ledgers <name>` | Enter interactive mode for a ledger |
-| → `add` | Add a transaction |
-| → `debit` | Add a debit (expense) — amount stored as negative |
-| → `credit` | Add a credit (income) — amount stored as positive |
-| → `bulk` | Add multiple transactions with the same date |
-| → `edit <id>` | Edit a transaction |
-| → `delete <id>` | Remove a transaction (with confirmation) |
-| → `clear <id>` | Mark as cleared |
-| → `reconcile` | Walk through unreconciled transactions, verify balance |
-| → `forecast [-d]` | Show including future transactions |
-| → `summary [--description] [--category]` | Transaction statistics |
-| → `details <id>` | Show full transaction details including notes |
-| → `sort` | Sort all transactions by date (reassigns IDs) |
-| → `sort <id> <pos>` | Move a transaction to a position (reassigns IDs) |
-| → `back` | Return to top-level |
-| `bills <file>` | Enter interactive mode for bills |
-| → `show` | Show upcoming bill instances |
-| → `add` | Add a recurring bill |
-| → `receive <name> [--due DATE] [--amount AMT]` | Record a bill statement received |
-| → `pay <name> [--add <ledger>] [--date DATE]` | Mark a bill as paid |
-| → `edit <id>` | Edit a bill |
-| → `remove <id>` | Remove a bill |
-| → `back` | Return to top-level |
 | `--version` | Show version |
+
+### Ledger REPL commands
+
+| Command | Description |
+|---------|-------------|
+| `show` | Show transactions |
+| `add` | Add a transaction |
+| `debit` | Add a debit (expense) — amount stored as negative |
+| `credit` | Add a credit (income) — amount stored as positive |
+| `bulk` | Add multiple transactions with the same date |
+| `edit <id>` | Edit a transaction |
+| `delete <id>` | Remove a transaction (with confirmation) |
+| `clear <id>` | Mark as cleared |
+| `reconcile` | Walk through unreconciled transactions, verify balance |
+| `forecast [-d]` | Show including future transactions |
+| `summary` | Transaction statistics |
+| `details <id>` | Show full transaction details including bill links |
+| `sort` | Sort all transactions by date (reassigns IDs) |
+| `sort <id> <pos>` | Move a transaction to a position |
+| `back` | Return to ledgers mode |
+
+### Bills REPL commands
+
+| Command | Description |
+|---------|-------------|
+| `show` | Show upcoming bill instances |
+| `add` | Add a recurring bill |
+| `receive <name> [--due DATE] [--amount AMT]` | Record a bill statement received |
+| `pay <name> [--add <ledger>] [--date DATE]` | Mark a bill as paid |
+| `edit <id>` | Edit a bill |
+| `remove <id>` | Remove a bill |
+| `back` | Return to bills mode |
 
 ## Bills
 
