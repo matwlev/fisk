@@ -809,6 +809,33 @@ def get_default_flags():
     return flags
 
 
+def apply_default_sign(amt_str):
+    """Apply default sign from config to an amount string.
+    If --default-sign is 'debit', bare numbers become negative.
+    Explicit +/- prefix always wins."""
+    if not amt_str:
+        return amt_str
+    # Explicit sign — leave as-is
+    if amt_str[0] in ("+", "-"):
+        return amt_str
+    defaults = get_default_flags()
+    sign = defaults.get("--default-sign", "").lower()
+    if sign == "debit":
+        return f"-{amt_str}"
+    return amt_str
+
+
+def get_amount_prompt():
+    """Return the Amount prompt with a hint about default sign."""
+    defaults = get_default_flags()
+    sign = defaults.get("--default-sign", "").lower()
+    if sign == "debit":
+        return "  Amount [-]: "
+    elif sign == "credit":
+        return "  Amount [+]: "
+    return "  Amount: "
+
+
 def format_table(rows, include_future=False, start_date=None, end_date=None, status_filter=None, sort_order="desc", limit=None, amount_filter=None, offset=0):
     """Format rows into a table with debit/credit/balance columns. Returns total count for pagination."""
     filtered = []
@@ -959,11 +986,18 @@ def cmd_add_noninteractive(args):
         return
     d = args.date if args.date else date.today().isoformat()
     status = "future" if date.fromisoformat(d) > date.today() else "pending"
+    # Resolve amount from --amount, --debit, or --credit
+    if args.amount:
+        amt = args.amount
+    elif args.debit:
+        amt = str(-abs(Decimal(args.debit)))
+    else:
+        amt = str(abs(Decimal(args.credit)))
     rows.append({
         "id": str(next_id(rows)),
         "date": d,
         "description": args.desc,
-        "amount": args.amount,
+        "amount": amt,
         "category": args.category or "",
         "status": status,
         "notes": args.notes or "",
@@ -1360,7 +1394,8 @@ class LedgerRepl(cmd.Cmd):
                 return
             d = parse_date_or_relative(d).isoformat()
             desc = input_with_completion("  Description: ", descriptions).strip()
-            amt = input("  Amount: ").strip()
+            amt = input(get_amount_prompt()).strip()
+            amt = apply_default_sign(amt)
             cat = input_with_completion("  Category []: ", categories).strip()
             notes = input("  Notes []: ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -1408,7 +1443,8 @@ class LedgerRepl(cmd.Cmd):
                 desc = input_with_completion("  Description: ", descriptions).strip()
                 if not desc:
                     break
-                amt = input("  Amount: ").strip()
+                amt = input(get_amount_prompt()).strip()
+                amt = apply_default_sign(amt)
                 Decimal(amt)
                 cat = input_with_completion("  Category []: ", categories).strip()
                 notes = input("  Notes []: ").strip()
@@ -2309,7 +2345,10 @@ def build_parser():
     p.add_argument("ledger", help="Ledger to add to")
     p.add_argument("--date", help="Transaction date (default: today)")
     p.add_argument("--desc", required=True, help="Description")
-    p.add_argument("--amount", required=True, help="Amount (positive for credit, negative for debit)")
+    amt_group = p.add_mutually_exclusive_group(required=True)
+    amt_group.add_argument("--amount", help="Amount (positive for credit, negative for debit)")
+    amt_group.add_argument("--debit", help="Debit amount (stored as negative)")
+    amt_group.add_argument("--credit", help="Credit amount (stored as positive)")
     p.add_argument("--category", default="", help="Category (optional)")
     p.add_argument("--notes", default="", help="Notes (optional)")
 
