@@ -341,6 +341,28 @@ def get_instance_for_bill(name, bill_id, due_date_str=None):
     return None
 
 
+def find_bill_by_name(bill_name):
+    """Search all bill files for a bill by name. Returns (bill_file, bill) or None.
+    Prints error and returns None if name is ambiguous."""
+    matches = []
+    for bf_name in list_bill_files():
+        bills = read_bills(bf_name)
+        if not bills:
+            continue
+        for b in bills:
+            if b["name"].lower() == bill_name.lower():
+                matches.append((bf_name, b))
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        files = ", ".join(m[0] for m in matches)
+        print(f"  '{bill_name}' found in multiple files: {files}")
+        print(f"  Use: bills <file> pay {bill_name}")
+        return None
+    print(f"  Bill '{bill_name}' not found.")
+    return None
+
+
 def next_bill_id(rows):
     if not rows:
         return 1
@@ -627,7 +649,7 @@ def validate_date(val):
         return None
 
 
-def show_dashboard(show_source=False):
+def show_dashboard(show_source=True):
     """Display ledger list and upcoming bills. Used by both REPL and CLI."""
     ledgers = list_ledgers()
     if ledgers:
@@ -646,7 +668,7 @@ def show_dashboard(show_source=False):
             print(f"  {'─'*56}")
             for b in due_bills:
                 due_str = b["due"].strftime("%b %d")
-                source_str = f"  [{b['source']}]" if show_source else ""
+                source_str = f"  [{b['source']}]"
                 if b["amount"] is not None:
                     prefix = "~$" if b["is_estimate"] else " $"
                     print(f"  {b['name']:<18} {prefix}{b['amount']:>9,.2f}  due {due_str:<8} {b['status']}{source_str}")
@@ -1153,6 +1175,84 @@ class FiskRepl(cmd.Cmd):
             print(f"Bill file '{name}' not found.")
             return
         BillsRepl(name).cmdloop()
+
+    def do_pay(self, line):
+        """pay <bill name> [--add <ledger>] [--date DATE] - pay a bill (auto-resolves file)"""
+        parts = line.split()
+        if not parts:
+            print("Usage: pay <bill name> [--add <ledger>] [--date DATE]")
+            return
+        flags, positional = parse_flags(parts, {"--add": str, "--date": str})
+        bill_name = " ".join(positional)
+        result = find_bill_by_name(bill_name)
+        if not result:
+            return
+        bf_name, bill = result
+        pay_bill(bf_name, bill["name"], add_ledger=flags.get("--add"), paid_date=flags.get("--date"))
+
+    def do_receive(self, line):
+        """receive <bill name> [--due DATE] [--amount AMT] - record a bill received (auto-resolves file)"""
+        parts = line.split()
+        if not parts:
+            print("Usage: receive <bill name> [--due DATE] [--amount AMT]")
+            return
+        flags, positional = parse_flags(parts, {"--due": str, "--amount": str})
+        bill_name = " ".join(positional)
+        result = find_bill_by_name(bill_name)
+        if not result:
+            return
+        bf_name, bill = result
+        # Get or prompt for due date
+        due_str = flags.get("--due")
+        if not due_str:
+            next_due = get_next_due(bill)
+            default = next_due.isoformat() if next_due else ""
+            try:
+                due_str = input(f"  Due date [{default}]: ").strip() or default
+            except (EOFError, KeyboardInterrupt):
+                print("\n  Cancelled.")
+                return
+        if not due_str or not validate_date(due_str):
+            print("  Invalid date.")
+            return
+        due_str = parse_date_or_relative(due_str).isoformat()
+        # Get or prompt for amount
+        amt_str = flags.get("--amount")
+        if not amt_str:
+            est, is_estimate = get_bill_amount(bill)
+            default_amt = f"~{est:.2f}" if est and is_estimate else (f"{est:.2f}" if est else "")
+            try:
+                amt_str = input(f"  Amount [{default_amt}]: ").strip() or (str(est) if est else "")
+            except (EOFError, KeyboardInterrupt):
+                print("\n  Cancelled.")
+                return
+        if amt_str:
+            try:
+                Decimal(amt_str)
+            except InvalidOperation:
+                print("  Invalid amount.")
+                return
+        instances = read_instances(bf_name)
+        existing = next((i for i in instances if i["bill_id"] == bill["id"] and i["due_date"] == due_str), None)
+        if existing:
+            if existing["status"] == "paid":
+                print(f"  Already paid on {existing['paid_date']}.")
+                return
+            existing["amount"] = amt_str
+            existing["status"] = "unpaid"
+        else:
+            instances.append({
+                "id": str(next_instance_id(instances)),
+                "bill_id": bill["id"],
+                "due_date": due_str,
+                "amount": amt_str,
+                "paid_date": "",
+                "status": "unpaid",
+                "ledger": "",
+                "transaction_id": "",
+            })
+        write_instances(bf_name, instances)
+        print(f"  ✓ {bill['name']} due {due_str} — ${Decimal(amt_str):,.2f}" if amt_str else f"  ✓ {bill['name']} due {due_str}")
 
     def do_quit(self, line):
         """Exit fisk"""
@@ -1670,6 +1770,14 @@ class BillsRepl(cmd.Cmd):
             if not name:
                 print("  Cancelled.")
                 return
+            # Warn if name exists in another bill file
+            for bf in list_bill_files():
+                if bf == self.name:
+                    continue
+                other_bills = read_bills(bf)
+                if other_bills and any(b["name"].lower() == name.lower() for b in other_bills):
+                    print(f"  ⚠ '{name}' also exists in [{bf}]")
+                    break
             amount = input("  Amount: ").strip()
             Decimal(amount)
             category = input("  Category []: ").strip()
