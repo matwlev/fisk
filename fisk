@@ -114,10 +114,12 @@ def list_ledgers():
     names = set(config["ledgers"].keys())
     bill_names = set(config.get("bills", {}).keys())
     bill_paths = set(Path(p).resolve() for p in config.get("bills", {}).values())
+    # Also exclude instance files (*_instances.csv)
+    instance_paths = set(instance_file_path(bf).resolve() for bf in config.get("bills", {}))
     d = get_ledger_dir()
     if d.exists():
         for p in d.glob("*.csv"):
-            if p.resolve() not in bill_paths and p.stem not in bill_names:
+            if p.resolve() not in bill_paths and p.resolve() not in instance_paths and p.stem not in bill_names:
                 names.update([p.stem])
     return sorted(names)
 
