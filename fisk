@@ -111,11 +111,12 @@ def ledger_path(name):
 def list_ledgers():
     config = get_config()
     names = set(config["ledgers"].keys())
+    bill_names = set(config.get("bills", {}).keys())
     bill_paths = set(Path(p).resolve() for p in config.get("bills", {}).values())
     d = get_ledger_dir()
     if d.exists():
         for p in d.glob("*.csv"):
-            if p.resolve() not in bill_paths:
+            if p.resolve() not in bill_paths and p.stem not in bill_names:
                 names.update([p.stem])
     return sorted(names)
 
@@ -343,7 +344,22 @@ def get_upcoming_bills(window_days=30):
                     "source": bf_name,
                 })
     upcoming.sort(key=lambda x: x["due"])
+    _clear_ledger_cache()
     return upcoming
+
+
+_ledger_cache = {}
+
+
+def _get_cached_ledger(name):
+    """Read a ledger with caching to avoid repeated disk reads during bill scanning."""
+    if name not in _ledger_cache:
+        _ledger_cache[name] = read_ledger(name)
+    return _ledger_cache[name]
+
+
+def _clear_ledger_cache():
+    _ledger_cache.clear()
 
 
 def find_likely_match(bill, due_date):
@@ -353,7 +369,7 @@ def find_likely_match(bill, due_date):
     window = timedelta(days=15)
     best = None
     for ledger_name in list_ledgers():
-        rows = read_ledger(ledger_name)
+        rows = _get_cached_ledger(ledger_name)
         if not rows:
             continue
         for r in rows:
@@ -377,7 +393,7 @@ def estimate_bill_amount(bill):
     target_name = bill["name"].lower()
     matches = []
     for ledger_name in list_ledgers():
-        rows = read_ledger(ledger_name)
+        rows = _get_cached_ledger(ledger_name)
         if not rows:
             continue
         for r in rows:
@@ -445,7 +461,7 @@ def parse_date_or_relative(val):
         elif unit == "w":
             return date.today() + timedelta(weeks=n)
         elif unit == "m":
-            return date.today() + timedelta(days=n * 30)
+            return add_month(date.today(), n)
     return date.fromisoformat(val)
 
 
@@ -460,6 +476,156 @@ def parse_amount_filter(val):
     except InvalidOperation:
         return None
     return (op, threshold)
+
+
+def parse_flags(parts, spec):
+    """Parse flags from a list of tokens. spec maps flag names to types (str, int, bool).
+    Returns (dict of flag values, list of positional args)."""
+    flags = {}
+    positional = []
+    i = 0
+    while i < len(parts):
+        if parts[i] in spec:
+            typ = spec[parts[i]]
+            if typ is bool:
+                flags[parts[i]] = True
+                i += 1
+            elif i + 1 < len(parts):
+                flags[parts[i]] = typ(parts[i + 1])
+                i += 2
+            else:
+                i += 1
+        else:
+            positional.append(parts[i])
+            i += 1
+    return flags, positional
+
+
+def validate_date(val):
+    """Validate a date string. Returns the date string if valid, None otherwise."""
+    try:
+        if val == "today" or re.match(r"^\+\d+[dwm]$", val):
+            parse_date_or_relative(val)
+            return val
+        date.fromisoformat(val)
+        return val
+    except (ValueError, TypeError):
+        return None
+
+
+def show_dashboard(show_source=False):
+    """Display ledger list and upcoming bills. Used by both REPL and CLI."""
+    ledgers = list_ledgers()
+    if ledgers:
+        print("  Ledgers")
+        print(f"  {'─'*16}")
+        for l in ledgers:
+            print(f"  {l}")
+    else:
+        print("  No ledgers. Use 'create <name>' to create one.")
+    bill_files = list_bill_files()
+    if bill_files:
+        upcoming = get_upcoming_bills(30)
+        unpaid = [b for b in upcoming if b["status"] == "unpaid"]
+        if unpaid:
+            print(f"\n  Bills (next 30 days)")
+            print(f"  {'─'*56}")
+            for b in unpaid:
+                due_str = b["due"].strftime("%b %d")
+                source_str = f"  [{b['source']}]" if show_source else ""
+                if b["amount"] is not None:
+                    prefix = "~$" if b["is_estimate"] else " $"
+                    print(f"  {b['name']:<18} {prefix}{b['amount']:>9,.2f}  due {due_str:<8} {b['status']}{source_str}")
+                else:
+                    print(f"  {b['name']:<18} {'':>11}  due {due_str:<8} {b['status']}{source_str}")
+
+
+def pay_bill(bill_file, bill_name, add_ledger=None):
+    """Shared pay logic for both REPL and CLI. Returns True on success."""
+    bills = read_bills(bill_file)
+    if not bills:
+        return False
+    bill = next((b for b in bills if b["name"].lower() == bill_name.lower()), None)
+    if not bill:
+        print(f"  Bill '{bill_name}' not found.")
+        return False
+    next_due = get_next_due(bill)
+    if not next_due:
+        print(f"  No upcoming due date for '{bill_name}'.")
+        return False
+    match = find_likely_match(bill, next_due)
+    if match:
+        print(f"  Likely match: {match}")
+    else:
+        print(f"  No matching transaction found.")
+    try:
+        confirm = input(f"  Mark paid through {next_due}? [Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\n  Cancelled.")
+        return False
+    if confirm and confirm != "y":
+        print("  Cancelled.")
+        return False
+    if add_ledger:
+        ledger_rows = read_ledger(add_ledger)
+        if ledger_rows is None:
+            print(f"  Ledger '{add_ledger}' not found. Bill not marked paid.")
+            return False
+        existing = find_matching_transaction(bill, next_due, add_ledger)
+        if existing:
+            for r in ledger_rows:
+                if r["id"] == existing["id"] and r["status"] == "future":
+                    r["status"] = "pending"
+                    write_ledger(add_ledger, ledger_rows)
+                    print(f"  ✓ {add_ledger} #{r['id']} marked pending")
+                    break
+            else:
+                print(f"  ✓ Matched {add_ledger} #{existing['id']}")
+        else:
+            amt, is_estimate = get_bill_amount(bill)
+            if amt is None:
+                try:
+                    amt_input = input("  Amount: ").strip()
+                    amt = Decimal(amt_input)
+                except (EOFError, KeyboardInterrupt, InvalidOperation):
+                    print("\n  Cancelled.")
+                    return False
+            elif is_estimate:
+                try:
+                    amt_input = input(f"  Amount [~{amt:.2f}]: ").strip()
+                    if amt_input:
+                        amt = Decimal(amt_input)
+                except (EOFError, KeyboardInterrupt, InvalidOperation):
+                    print("\n  Cancelled.")
+                    return False
+            ledger_rows.append({
+                "id": str(next_id(ledger_rows)),
+                "date": date.today().isoformat(),
+                "description": bill["name"],
+                "amount": str(-abs(amt)),
+                "category": bill["category"],
+                "status": "pending",
+                "notes": "",
+            })
+            write_ledger(add_ledger, ledger_rows)
+            print(f"  ✓ Transaction added to {add_ledger} (#{ledger_rows[-1]['id']})")
+    bill["paid_through"] = next_due.isoformat()
+    write_bills(bill_file, bills)
+    print(f"  ✓ {bill['name']} paid through {next_due}")
+    return True
+
+
+def get_default_flags():
+    """Parse [defaults] section from config into a dict."""
+    config = get_config()
+    flags = {}
+    for line in config.get("defaults", []):
+        parts = line.split(None, 1)
+        if len(parts) == 2:
+            flags[parts[0]] = parts[1]
+        elif len(parts) == 1:
+            flags[parts[0]] = True
+    return flags
 
 
 def format_table(rows, include_future=False, start_date=None, end_date=None, status_filter=None, sort_order="desc", limit=None, amount_filter=None, offset=0):
@@ -577,39 +743,18 @@ def cmd_create(args):
 
 def cmd_show(args):
     if not args.ledger:
-        ledgers = list_ledgers()
-        bill_files = list_bill_files()
-        if ledgers:
-            print("  Ledgers")
-            print(f"  {'─'*16}")
-            for l in ledgers:
-                print(f"  {l}")
-        else:
-            print("No ledgers. Use 'create <name>' to create one.")
-        if bill_files:
-            upcoming = get_upcoming_bills(30)
-            unpaid = [b for b in upcoming if b["status"] == "unpaid"]
-            if unpaid:
-                show_source = args.source if hasattr(args, "source") else False
-                print(f"\n  Bills (next 30 days)")
-                print(f"  {'─'*56}")
-                for b in unpaid:
-                    due_str = b["due"].strftime("%b %d")
-                    source_str = f"  [{b['source']}]" if show_source else ""
-                    if b["amount"] is not None:
-                        prefix = "~$" if b["is_estimate"] else " $"
-                        print(f"  {b['name']:<18} {prefix}{b['amount']:>9,.2f}  due {due_str:<8} {b['status']}{source_str}")
-                    else:
-                        print(f"  {b['name']:<18} {'':>11}  due {due_str:<8} {b['status']}{source_str}")
+        show_source = args.source if hasattr(args, "source") else False
+        show_dashboard(show_source=show_source)
         return
     rows = read_ledger(args.ledger)
     if rows is None:
         return
+    defaults = get_default_flags()
     start = parse_date_or_relative(args.start_date) if args.start_date else None
     end = parse_date_or_relative(args.end_date) if args.end_date else date.today()
     status_filter = args.status if hasattr(args, "status") and args.status else None
-    sort_order = args.sort if hasattr(args, "sort") and args.sort else "desc"
-    limit = args.limit if hasattr(args, "limit") else None
+    sort_order = args.sort if hasattr(args, "sort") and args.sort else defaults.get("--sort", "desc")
+    limit = args.limit if hasattr(args, "limit") and args.limit is not None else (int(defaults["--limit"]) if "--limit" in defaults else None)
     amount_filter = parse_amount_filter(args.amount) if hasattr(args, "amount") and args.amount else None
     format_table(rows, include_future=False, start_date=start, end_date=end, status_filter=status_filter, sort_order=sort_order, limit=limit, amount_filter=amount_filter)
 
@@ -618,10 +763,11 @@ def cmd_forecast(args):
     rows = read_ledger(args.ledger)
     if rows is None:
         return
+    defaults = get_default_flags()
     end = parse_date_or_relative(args.d) if args.d else date.today() + timedelta(days=30)
     start = parse_date_or_relative(args.start_date) if args.start_date else None
-    sort_order = args.sort if hasattr(args, "sort") and args.sort else "desc"
-    limit = args.limit if hasattr(args, "limit") else None
+    sort_order = args.sort if hasattr(args, "sort") and args.sort else defaults.get("--sort", "desc")
+    limit = args.limit if hasattr(args, "limit") and args.limit is not None else (int(defaults["--limit"]) if "--limit" in defaults else None)
     amount_filter = parse_amount_filter(args.amount) if hasattr(args, "amount") and args.amount else None
     format_table(rows, include_future=True, start_date=start, end_date=end, sort_order=sort_order, limit=limit, amount_filter=amount_filter)
 
@@ -696,30 +842,7 @@ class FiskRepl(cmd.Cmd):
         """show [ledger] [--start-date DATE] [--end-date DATE] [--status STATUS] [--source]"""
         parts = line.split()
         if not parts:
-            # Dashboard: ledgers + upcoming bills
-            ledgers = list_ledgers()
-            if ledgers:
-                print("  Ledgers")
-                print(f"  {'─'*16}")
-                for l in ledgers:
-                    print(f"  {l}")
-            else:
-                print("  No ledgers.")
-
-            bill_files = list_bill_files()
-            if bill_files:
-                upcoming = get_upcoming_bills(30)
-                unpaid = [b for b in upcoming if b["status"] == "unpaid"]
-                if unpaid:
-                    print(f"\n  Bills (next 30 days)")
-                    print(f"  {'─'*56}")
-                    for b in unpaid:
-                        due_str = b["due"].strftime("%b %d")
-                        if b["amount"] is not None:
-                            prefix = "~$" if b["is_estimate"] else " $"
-                            print(f"  {b['name']:<18} {prefix}{b['amount']:>9,.2f}  due {due_str:<8} {b['status']}")
-                        else:
-                            print(f"  {b['name']:<18} {'':>11}  due {due_str:<8} {b['status']}")
+            show_dashboard()
             return
         if parts[0] == "next":
             self.do_next(" ".join(parts[1:]))
@@ -729,29 +852,15 @@ class FiskRepl(cmd.Cmd):
         if rows is None:
             return
         # Parse inline flags
-        start, end, status, sort_order, limit, amount_filter = None, date.today(), None, "desc", None, None
-        i = 1
-        while i < len(parts):
-            if parts[i] == "--start-date" and i + 1 < len(parts):
-                start = parse_date_or_relative(parts[i + 1])
-                i += 2
-            elif parts[i] == "--end-date" and i + 1 < len(parts):
-                end = parse_date_or_relative(parts[i + 1])
-                i += 2
-            elif parts[i] == "--status" and i + 1 < len(parts):
-                status = parts[i + 1]
-                i += 2
-            elif parts[i] == "--sort" and i + 1 < len(parts):
-                sort_order = parts[i + 1]
-                i += 2
-            elif parts[i] == "--limit" and i + 1 < len(parts):
-                limit = int(parts[i + 1])
-                i += 2
-            elif parts[i] == "--amount" and i + 1 < len(parts):
-                amount_filter = parse_amount_filter(parts[i + 1])
-                i += 2
-            else:
-                i += 1
+        defaults = get_default_flags()
+        spec = {"--start-date": str, "--end-date": str, "--status": str, "--sort": str, "--limit": int, "--amount": str}
+        flags, _ = parse_flags(parts[1:], spec)
+        start = parse_date_or_relative(flags["--start-date"]) if "--start-date" in flags else None
+        end = parse_date_or_relative(flags["--end-date"]) if "--end-date" in flags else date.today()
+        status = flags.get("--status")
+        sort_order = flags.get("--sort", defaults.get("--sort", "desc"))
+        limit = flags.get("--limit", int(defaults["--limit"]) if "--limit" in defaults else None)
+        amount_filter = parse_amount_filter(flags["--amount"]) if "--amount" in flags else None
         effective_limit = limit if limit is not None else 20
         self._last_show = {
             "name": name, "start": start, "end": end, "status": status,
@@ -765,15 +874,8 @@ class FiskRepl(cmd.Cmd):
         if not self._last_show:
             print("  No previous show command. Run 'show <ledger>' first.")
             return
-        parts = line.split()
-        limit = self._last_show["limit"]
-        i = 0
-        while i < len(parts):
-            if parts[i] == "--limit" and i + 1 < len(parts):
-                limit = int(parts[i + 1])
-                i += 2
-            else:
-                i += 1
+        flags, _ = parse_flags(line.split(), {"--limit": int})
+        limit = flags.get("--limit", self._last_show["limit"])
         p = self._last_show
         rows = read_ledger(p["name"])
         if rows is None:
@@ -793,30 +895,14 @@ class FiskRepl(cmd.Cmd):
         rows = read_ledger(name)
         if rows is None:
             return
-        end = date.today() + timedelta(days=30)
-        start = None
-        sort_order = "desc"
-        limit = None
-        amount_filter = None
-        i = 1
-        while i < len(parts):
-            if parts[i] == "-d" and i + 1 < len(parts):
-                end = parse_date_or_relative(parts[i + 1])
-                i += 2
-            elif parts[i] == "--start-date" and i + 1 < len(parts):
-                start = parse_date_or_relative(parts[i + 1])
-                i += 2
-            elif parts[i] == "--sort" and i + 1 < len(parts):
-                sort_order = parts[i + 1]
-                i += 2
-            elif parts[i] == "--limit" and i + 1 < len(parts):
-                limit = int(parts[i + 1])
-                i += 2
-            elif parts[i] == "--amount" and i + 1 < len(parts):
-                amount_filter = parse_amount_filter(parts[i + 1])
-                i += 2
-            else:
-                i += 1
+        defaults = get_default_flags()
+        spec = {"-d": str, "--start-date": str, "--sort": str, "--limit": int, "--amount": str}
+        flags, _ = parse_flags(parts[1:], spec)
+        end = parse_date_or_relative(flags["-d"]) if "-d" in flags else date.today() + timedelta(days=30)
+        start = parse_date_or_relative(flags["--start-date"]) if "--start-date" in flags else None
+        sort_order = flags.get("--sort", defaults.get("--sort", "desc"))
+        limit = flags.get("--limit", int(defaults["--limit"]) if "--limit" in defaults else None)
+        amount_filter = parse_amount_filter(flags["--amount"]) if "--amount" in flags else None
         format_table(rows, include_future=True, start_date=start, end_date=end, sort_order=sort_order, limit=limit, amount_filter=amount_filter)
 
     def do_create(self, line):
@@ -826,22 +912,11 @@ class FiskRepl(cmd.Cmd):
             print("Usage: create <name> [--balance AMOUNT] [--path PATH] [--config FILE]")
             return
         name = parts[0]
-        balance = "0.00"
-        csv_path = None
-        cfg_file = None
-        i = 1
-        while i < len(parts):
-            if parts[i] == "--balance" and i + 1 < len(parts):
-                balance = parts[i + 1]
-                i += 2
-            elif parts[i] == "--path" and i + 1 < len(parts):
-                csv_path = parts[i + 1]
-                i += 2
-            elif parts[i] == "--config" and i + 1 < len(parts):
-                cfg_file = parts[i + 1]
-                i += 2
-            else:
-                i += 1
+        spec = {"--balance": str, "--path": str, "--config": str}
+        flags, _ = parse_flags(parts[1:], spec)
+        balance = flags.get("--balance", "0.00")
+        csv_path = flags.get("--path")
+        cfg_file = flags.get("--config")
         if csv_path:
             path = Path(csv_path).expanduser()
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -893,6 +968,27 @@ class FiskRepl(cmd.Cmd):
                 for b in bill_files:
                     print(f"  {b}")
             return
+        if parts[0] == "create":
+            # bills create <name> [--path PATH]
+            if len(parts) < 2:
+                print("Usage: bills create <name> [--path PATH]")
+                return
+            name = parts[1]
+            flags, _ = parse_flags(parts[2:], {"--path": str})
+            if "--path" in flags:
+                path = Path(flags["--path"]).expanduser()
+                path.parent.mkdir(parents=True, exist_ok=True)
+            else:
+                path = get_ledger_dir() / f"{name}.csv"
+            if path.exists():
+                print(f"Bill file '{name}' already exists at {path}.")
+                return
+            with open(path, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=BILL_FIELDNAMES)
+                w.writeheader()
+            add_bills_to_config(name, str(path))
+            print(f"Created: {path}")
+            return
         name = parts[0]
         if not bill_file_path(name).exists():
             print(f"Bill file '{name}' not found.")
@@ -926,29 +1022,15 @@ class LedgerRepl(cmd.Cmd):
         if parts and parts[0] == "next":
             self.do_next(" ".join(parts[1:]))
             return
-        start, end, status, sort_order, limit, amount_filter = None, date.today(), None, "desc", None, None
-        i = 0
-        while i < len(parts):
-            if parts[i] == "--start-date" and i + 1 < len(parts):
-                start = parse_date_or_relative(parts[i + 1])
-                i += 2
-            elif parts[i] == "--end-date" and i + 1 < len(parts):
-                end = parse_date_or_relative(parts[i + 1])
-                i += 2
-            elif parts[i] == "--status" and i + 1 < len(parts):
-                status = parts[i + 1]
-                i += 2
-            elif parts[i] == "--sort" and i + 1 < len(parts):
-                sort_order = parts[i + 1]
-                i += 2
-            elif parts[i] == "--limit" and i + 1 < len(parts):
-                limit = int(parts[i + 1])
-                i += 2
-            elif parts[i] == "--amount" and i + 1 < len(parts):
-                amount_filter = parse_amount_filter(parts[i + 1])
-                i += 2
-            else:
-                i += 1
+        defaults = get_default_flags()
+        spec = {"--start-date": str, "--end-date": str, "--status": str, "--sort": str, "--limit": int, "--amount": str}
+        flags, _ = parse_flags(parts, spec)
+        start = parse_date_or_relative(flags["--start-date"]) if "--start-date" in flags else None
+        end = parse_date_or_relative(flags["--end-date"]) if "--end-date" in flags else date.today()
+        status = flags.get("--status")
+        sort_order = flags.get("--sort", defaults.get("--sort", "desc"))
+        limit = flags.get("--limit", int(defaults["--limit"]) if "--limit" in defaults else None)
+        amount_filter = parse_amount_filter(flags["--amount"]) if "--amount" in flags else None
         effective_limit = limit if limit is not None else 20
         self._last_show = {
             "start": start, "end": end, "status": status,
@@ -962,15 +1044,8 @@ class LedgerRepl(cmd.Cmd):
         if not self._last_show:
             print("  No previous show command. Run 'show' first.")
             return
-        parts = line.split()
-        limit = self._last_show["limit"]
-        i = 0
-        while i < len(parts):
-            if parts[i] == "--limit" and i + 1 < len(parts):
-                limit = int(parts[i + 1])
-                i += 2
-            else:
-                i += 1
+        flags, _ = parse_flags(line.split(), {"--limit": int})
+        limit = flags.get("--limit", self._last_show["limit"])
         p = self._last_show
         rows = read_ledger(self.name)
         if rows is None:
@@ -985,31 +1060,14 @@ class LedgerRepl(cmd.Cmd):
         rows = read_ledger(self.name)
         if rows is None:
             return
-        parts = line.split()
-        end = date.today() + timedelta(days=30)
-        start = None
-        sort_order = "desc"
-        limit = None
-        amount_filter = None
-        i = 0
-        while i < len(parts):
-            if parts[i] == "-d" and i + 1 < len(parts):
-                end = parse_date_or_relative(parts[i + 1])
-                i += 2
-            elif parts[i] == "--start-date" and i + 1 < len(parts):
-                start = parse_date_or_relative(parts[i + 1])
-                i += 2
-            elif parts[i] == "--sort" and i + 1 < len(parts):
-                sort_order = parts[i + 1]
-                i += 2
-            elif parts[i] == "--limit" and i + 1 < len(parts):
-                limit = int(parts[i + 1])
-                i += 2
-            elif parts[i] == "--amount" and i + 1 < len(parts):
-                amount_filter = parse_amount_filter(parts[i + 1])
-                i += 2
-            else:
-                i += 1
+        defaults = get_default_flags()
+        spec = {"-d": str, "--start-date": str, "--sort": str, "--limit": int, "--amount": str}
+        flags, _ = parse_flags(line.split(), spec)
+        end = parse_date_or_relative(flags["-d"]) if "-d" in flags else date.today() + timedelta(days=30)
+        start = parse_date_or_relative(flags["--start-date"]) if "--start-date" in flags else None
+        sort_order = flags.get("--sort", defaults.get("--sort", "desc"))
+        limit = flags.get("--limit", int(defaults["--limit"]) if "--limit" in defaults else None)
+        amount_filter = parse_amount_filter(flags["--amount"]) if "--amount" in flags else None
         format_table(rows, include_future=True, start_date=start, end_date=end, sort_order=sort_order, limit=limit, amount_filter=amount_filter)
 
     def do_summary(self, line):
@@ -1017,33 +1075,16 @@ class LedgerRepl(cmd.Cmd):
         rows = read_ledger(self.name)
         if rows is None:
             return
-        parts = line.split()
-        description, category, start_date, end_date = None, None, None, None
-        i = 0
-        while i < len(parts):
-            if parts[i] == "--description" and i + 1 < len(parts):
-                description = parts[i + 1]
-                i += 2
-            elif parts[i] == "--category" and i + 1 < len(parts):
-                category = parts[i + 1]
-                i += 2
-            elif parts[i] == "--start-date" and i + 1 < len(parts):
-                start_date = parts[i + 1]
-                i += 2
-            elif parts[i] == "--end-date" and i + 1 < len(parts):
-                end_date = parts[i + 1]
-                i += 2
-            else:
-                i += 1
-        # Reuse cmd_summary by building a namespace
+        spec = {"--description": str, "--category": str, "--start-date": str, "--end-date": str}
+        flags, _ = parse_flags(line.split(), spec)
         class Args:
             pass
         args = Args()
         args.ledger = self.name
-        args.description = description
-        args.category = category
-        args.start_date = start_date
-        args.end_date = end_date
+        args.description = flags.get("--description")
+        args.category = flags.get("--category")
+        args.start_date = flags.get("--start-date")
+        args.end_date = flags.get("--end-date")
         cmd_summary(args)
 
     def do_add(self, line):
@@ -1055,6 +1096,10 @@ class LedgerRepl(cmd.Cmd):
         categories = sorted(set(r["category"] for r in rows if r["category"]))
         try:
             d = input(f"  Date [{date.today().isoformat()}]: ").strip() or date.today().isoformat()
+            if not validate_date(d):
+                print("  Invalid date. Use YYYY-MM-DD, 'today', or +Nd/+Nw/+Nm.")
+                return
+            d = parse_date_or_relative(d).isoformat()
             desc = input_with_completion("  Description: ", descriptions).strip()
             amt = input("  Amount: ").strip()
             cat = input_with_completion("  Category []: ", categories).strip()
@@ -1087,13 +1132,13 @@ class LedgerRepl(cmd.Cmd):
             return
         try:
             d = input(f"  Date [{date.today().isoformat()}]: ").strip() or date.today().isoformat()
-            date.fromisoformat(d)
         except (EOFError, KeyboardInterrupt):
             print("\n  Cancelled.")
             return
-        except ValueError:
-            print("  Invalid date.")
+        if not validate_date(d):
+            print("  Invalid date. Use YYYY-MM-DD, 'today', or +Nd/+Nw/+Nm.")
             return
+        d = parse_date_or_relative(d).isoformat()
         status = "future" if date.fromisoformat(d) > date.today() else "pending"
         count = 0
         print("  Enter transactions (empty description to finish):")
@@ -1145,7 +1190,12 @@ class LedgerRepl(cmd.Cmd):
         descriptions = sorted(set(r["description"] for r in rows if r["status"] != "starting"))
         categories = sorted(set(r["category"] for r in rows if r["category"]))
         try:
-            row["date"] = input(f"  Date [{row['date']}]: ").strip() or row["date"]
+            new_date = input(f"  Date [{row['date']}]: ").strip()
+            if new_date:
+                if not validate_date(new_date):
+                    print("  Invalid date. Use YYYY-MM-DD, 'today', or +Nd/+Nw/+Nm.")
+                    return
+                row["date"] = parse_date_or_relative(new_date).isoformat()
             row["description"] = input_with_completion(f"  Description [{row['description']}]: ", descriptions).strip() or row["description"]
             amt = input(f"  Amount [{row['amount']}]: ").strip()
             if amt:
@@ -1200,6 +1250,22 @@ class LedgerRepl(cmd.Cmd):
             return
         rows = read_ledger(self.name)
         if rows is None:
+            return
+        to_clear = [r for r in rows if r["id"] in set(ids)]
+        if not to_clear:
+            print("  No matching transactions.")
+            return
+        for r in to_clear:
+            amt = Decimal(r["amount"])
+            sign = f"-{abs(amt):.2f}" if amt < 0 else f"{amt:.2f}"
+            print(f"  #{r['id']}  {r['date']}  {r['description']}  {sign}")
+        try:
+            confirm = input("  Mark as cleared? [Y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
+            return
+        if confirm and confirm != "y":
+            print("  Cancelled.")
             return
         for r in rows:
             if r["id"] in set(ids):
@@ -1455,93 +1521,9 @@ class BillsRepl(cmd.Cmd):
         if not parts:
             print("Usage: pay <bill name> [--add <ledger>]")
             return
-        # Parse --add flag
-        add_ledger = None
-        bill_name_parts = []
-        i = 0
-        while i < len(parts):
-            if parts[i] == "--add" and i + 1 < len(parts):
-                add_ledger = parts[i + 1]
-                i += 2
-            else:
-                bill_name_parts.append(parts[i])
-                i += 1
-        bill_name = " ".join(bill_name_parts)
-
-        bills = read_bills(self.name)
-        if not bills:
-            return
-        bill = next((b for b in bills if b["name"].lower() == bill_name.lower()), None)
-        if not bill:
-            print(f"  Bill '{bill_name}' not found.")
-            return
-        next_due = get_next_due(bill)
-        if not next_due:
-            print(f"  No upcoming due date for '{bill_name}'.")
-            return
-        match = find_likely_match(bill, next_due)
-        if match:
-            print(f"  Likely match: {match}")
-        else:
-            print(f"  No matching transaction found.")
-        try:
-            confirm = input(f"  Mark paid through {next_due}? [Y/n] ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print("\n  Cancelled.")
-            return
-        if confirm and confirm != "y":
-            print("  Cancelled.")
-            return
-        # Optionally add transaction to ledger
-        if add_ledger:
-            ledger_rows = read_ledger(add_ledger)
-            if ledger_rows is None:
-                print(f"  Ledger '{add_ledger}' not found. Bill not marked paid.")
-                return
-            # Look for existing matching transaction
-            existing = find_matching_transaction(bill, next_due, add_ledger)
-            if existing:
-                # Transaction already exists — just update its status
-                for r in ledger_rows:
-                    if r["id"] == existing["id"] and r["status"] == "future":
-                        r["status"] = "pending"
-                        write_ledger(add_ledger, ledger_rows)
-                        print(f"  ✓ {add_ledger} #{r['id']} marked pending")
-                        break
-                else:
-                    print(f"  ✓ Matched {add_ledger} #{existing['id']}")
-            else:
-                # No match — prompt for amount and create transaction
-                amt, is_estimate = get_bill_amount(bill)
-                if amt is None:
-                    try:
-                        amt_input = input("  Amount: ").strip()
-                        amt = Decimal(amt_input)
-                    except (EOFError, KeyboardInterrupt, InvalidOperation):
-                        print("\n  Cancelled.")
-                        return
-                elif is_estimate:
-                    try:
-                        amt_input = input(f"  Amount [~{amt:.2f}]: ").strip()
-                        if amt_input:
-                            amt = Decimal(amt_input)
-                    except (EOFError, KeyboardInterrupt, InvalidOperation):
-                        print("\n  Cancelled.")
-                        return
-                ledger_rows.append({
-                    "id": str(next_id(ledger_rows)),
-                    "date": date.today().isoformat(),
-                    "description": bill["name"],
-                    "amount": str(-abs(amt)),
-                    "category": bill["category"],
-                    "status": "pending",
-                    "notes": "",
-                })
-                write_ledger(add_ledger, ledger_rows)
-                print(f"  ✓ Transaction added to {add_ledger} (#{ledger_rows[-1]['id']})")
-        bill["paid_through"] = next_due.isoformat()
-        write_bills(self.name, bills)
-        print(f"  ✓ {bill['name']} paid through {next_due}")
+        flags, positional = parse_flags(parts, {"--add": str})
+        bill_name = " ".join(positional)
+        pay_bill(self.name, bill_name, add_ledger=flags.get("--add"))
 
     def do_edit(self, line):
         """edit <id> - edit a bill"""
@@ -1887,75 +1869,7 @@ def cmd_bills(args):
         if not args.bill_name:
             print("Usage: fisk bills <file> pay <bill name> [--add <ledger>]")
             return
-        bills = read_bills(args.bill_file)
-        if not bills:
-            return
-        bill = next((b for b in bills if b["name"].lower() == args.bill_name.lower()), None)
-        if not bill:
-            print(f"  Bill '{args.bill_name}' not found.")
-            return
-        next_due = get_next_due(bill)
-        if not next_due:
-            print(f"  No upcoming due date for '{args.bill_name}'.")
-            return
-        match = find_likely_match(bill, next_due)
-        if match:
-            print(f"  Likely match: {match}")
-        else:
-            print(f"  No matching transaction found.")
-        try:
-            confirm = input(f"  Mark paid through {next_due}? [Y/n] ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print("\n  Cancelled.")
-            return
-        if confirm and confirm != "y":
-            print("  Cancelled.")
-            return
-        if args.add_ledger:
-            ledger_rows = read_ledger(args.add_ledger)
-            if ledger_rows is None:
-                return
-            existing = find_matching_transaction(bill, next_due, args.add_ledger)
-            if existing:
-                for r in ledger_rows:
-                    if r["id"] == existing["id"] and r["status"] == "future":
-                        r["status"] = "pending"
-                        write_ledger(args.add_ledger, ledger_rows)
-                        print(f"  ✓ {args.add_ledger} #{r['id']} marked pending")
-                        break
-                else:
-                    print(f"  ✓ Matched {args.add_ledger} #{existing['id']}")
-            else:
-                amt, is_estimate = get_bill_amount(bill)
-                if amt is None:
-                    try:
-                        amt_input = input("  Amount: ").strip()
-                        amt = Decimal(amt_input)
-                    except (EOFError, KeyboardInterrupt, InvalidOperation):
-                        print("\n  Cancelled.")
-                        return
-                elif is_estimate:
-                    try:
-                        amt_input = input(f"  Amount [~{amt:.2f}]: ").strip()
-                        if amt_input:
-                            amt = Decimal(amt_input)
-                    except (EOFError, KeyboardInterrupt, InvalidOperation):
-                        print("\n  Cancelled.")
-                        return
-                ledger_rows.append({
-                    "id": str(next_id(ledger_rows)),
-                    "date": date.today().isoformat(),
-                    "description": bill["name"],
-                    "amount": str(-abs(amt)),
-                    "category": bill["category"],
-                    "status": "pending",
-                    "notes": "",
-                })
-                write_ledger(args.add_ledger, ledger_rows)
-                print(f"  ✓ Transaction added to {args.add_ledger} (#{ledger_rows[-1]['id']})")
-        bill["paid_through"] = next_due.isoformat()
-        write_bills(args.bill_file, bills)
-        print(f"  ✓ {bill['name']} paid through {next_due}")
+        pay_bill(args.bill_file, args.bill_name, add_ledger=args.add_ledger)
 
 
 def build_parser():
