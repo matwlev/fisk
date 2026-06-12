@@ -160,7 +160,7 @@ Created: /Users/you/finances/bills.csv
 fisk> bills bills
 bills> add
   Name: Electric
-  Amount: 142.50
+  Amount (blank if variable): 142.50
   Category: Utilities
   Frequency (monthly, bimonthly, quarterly, semiannual, annual, or Nd e.g. 14d):
   Frequency: monthly
@@ -169,6 +169,8 @@ bills> add
   End date (blank for ongoing):
   Added.
 ```
+
+Leave amount blank for bills that vary each month (e.g. electric, water). The amount will be estimated from past payments or prompted at receive/pay time.
 
 ### See what's coming up
 
