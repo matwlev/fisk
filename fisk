@@ -1330,7 +1330,7 @@ class LedgerRepl(cmd.Cmd):
     def __init__(self, name):
         super().__init__()
         self.name = name
-        self.prompt = f"fisk (ledger: {name}) > "
+        self.prompt = f"fisk (ledger: {name})> "
         self._last_show = None
 
     def do_show(self, line):
@@ -1828,7 +1828,7 @@ class BillsRepl(cmd.Cmd):
     def __init__(self, name):
         super().__init__()
         self.name = name
-        self.prompt = f"fisk (bills: {name}) > "
+        self.prompt = f"fisk (bills: {name})> "
 
     def do_show(self, line):
         """show - show upcoming bill instances (predicted/unpaid/paid)"""
