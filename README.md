@@ -33,28 +33,228 @@ Installs to `~/.local/bin/fisk` and creates `~/.fisk/config`.
 
 Note: your data in `~/.fisk/` is preserved. Remove it manually if no longer needed.
 
-## Quick Start
+## Workflow: Ledgers
+
+### Create a ledger
 
 ```bash
-# Create a ledger
 fisk create checkbook --balance 4200.00
-
-# Create a ledger at a specific path
 fisk create savings --balance 10000.00 --path ~/finances/savings.csv
+```
 
-# Add transactions
+### Add transactions
+
+From the command line:
+
+```bash
 fisk add checkbook --desc "Electric bill" --amount -142.50 --category Utilities
 fisk add checkbook --desc "Paycheck" --amount 3200.00 --category Income
-
-# View it
-fisk show checkbook
-
-# Mark transactions as cleared
-fisk clear checkbook 2 3
-
-# Forecast future transactions
-fisk forecast checkbook -d +2w
 ```
+
+Or interactively:
+
+```
+fisk> ledgers checkbook
+checkbook> add
+  Date [2026-06-12]:
+  Description: Groceries
+  Amount: -87.34
+  Category []: Food
+  Notes []:
+  Added.
+```
+
+Use `bulk` to add multiple transactions with the same date:
+
+```
+checkbook> bulk
+  Date [2026-06-12]:
+  Enter transactions (empty description to finish):
+  Description: Coffee
+  Amount: -5.50
+  Category []: Food
+  Notes []:
+  ✓
+  Description: Gas
+  Amount: -42.00
+  Category []: Auto
+  Notes []:
+  ✓
+  Description:
+  Added 2 transactions.
+```
+
+### View transactions
+
+```bash
+fisk show checkbook                          # last 20 transactions
+fisk show checkbook --limit 0               # all transactions
+fisk show checkbook --status pending        # only pending
+fisk show checkbook --amount ">=100"        # $100+
+fisk show checkbook --start-date 2026-05-01 # since a date
+fisk forecast checkbook -d +2w             # include future-dated transactions
+```
+
+### Clear and reconcile
+
+Mark transactions as confirmed at the bank:
+
+```
+checkbook> clear 2 3
+  #2  2026-06-12  Electric bill  -142.50
+  #3  2026-06-12  Paycheck  3200.00
+  Mark as cleared? [Y/n]: y
+  Cleared.
+```
+
+Reconcile against a bank statement:
+
+```
+checkbook> reconcile
+  Statement ending balance: 7057.50
+  Statement date [2026-06-12]:
+
+  3 unreconciled transaction(s) through 2026-06-12:
+
+  #2  2026-06-12  Electric bill  -142.50  [Y/n/s]: y
+  #3  2026-06-12  Paycheck  3200.00  [Y/n/s]: y
+
+  Reconciled balance: 7057.50
+  Statement balance:  7057.50  ✓ Balanced!
+  2 transaction(s) reconciled.
+```
+
+### Summary
+
+```
+checkbook> summary
+  Transactions:  15
+  Total:         $3,200.00
+  Total spent:   $-1,842.34
+  ...
+
+  By category:
+    Food                 $  -312.50
+    Utilities            $  -285.00
+    ...
+```
+
+## Workflow: Bills
+
+### Create a bill file
+
+```bash
+fisk bills create bills --path ~/finances/bills.csv
+```
+
+Or from the REPL:
+
+```
+fisk> bills create bills --path ~/finances/bills.csv
+Created: /Users/you/finances/bills.csv
+```
+
+### Add a recurring bill
+
+```
+fisk> bills bills
+bills> add
+  Name: Electric
+  Amount: 142.50
+  Category: Utilities
+  Frequency (monthly, bimonthly, quarterly, semiannual, annual, or Nd e.g. 14d):
+  Frequency: monthly
+  Due day of month: 16
+  Start date [2026-06-12]: 2026-01-01
+  End date (blank for ongoing):
+  Added.
+```
+
+### See what's coming up
+
+The dashboard shows upcoming bills across all bill files:
+
+```
+fisk> show
+  Ledgers
+  ────────────────
+  checkbook
+
+  Bills (next 30 days)
+  ────────────────────────────────────────────────────────
+  Electric          $   142.50  due Jun 16  predicted
+  Netflix           $    15.99  due Jul 01  predicted
+```
+
+For more detail, enter the bill file:
+
+```
+bills> show
+  Bill                Amount  Due         Status      Paid
+  ────────────────── ──────────  ──────────  ──────────  ──────────
+  Electric            $ 142.50  Jun 16      predicted
+  Netflix             $  15.99  Jul 01      predicted
+```
+
+### Receive a bill (record the actual statement)
+
+When the bill arrives with the real due date and amount:
+
+```
+bills> receive Electric --due 2026-06-15 --amount 148.23
+  ✓ Electric due 2026-06-15 — $148.23
+```
+
+This converts the predicted instance to `unpaid` with real data. If the actual due date differs from the predicted one (e.g. 15th vs 16th), the prediction is suppressed within ±7 days.
+
+```
+bills> show
+  Bill                Amount  Due         Status      Paid
+  ────────────────── ──────────  ──────────  ──────────  ──────────
+  Electric            $ 148.23  Jun 15      unpaid
+  Netflix             $  15.99  Jul 01      predicted
+```
+
+### Pay a bill
+
+Mark it paid, optionally recording a ledger transaction:
+
+```
+bills> pay Electric --add checkbook
+  Paid date [2026-06-14]: 2026-06-14
+  ✓ Transaction added to checkbook (#5)
+  ✓ Electric paid 2026-06-14 (due 2026-06-15)
+```
+
+This:
+1. Creates a transaction in the checkbook ledger (negative amount, category from the bill)
+2. Links the ledger transaction to the bill instance (viewable via `details`)
+3. Advances `paid_through` so next month's prediction appears
+
+From the ledger, you can see the link:
+
+```
+checkbook> details 5
+  ID:          5
+  Date:        2026-06-14
+  Description: Electric
+  Amount:      -148.23
+  Category:    Utilities
+  Status:      pending
+  Linked bill: bills/Electric
+  Due date:    2026-06-15
+  Paid date:   2026-06-14
+```
+
+### Bill instance lifecycle
+
+```
+predicted → unpaid → paid
+```
+
+- **predicted** — auto-generated from frequency; amount estimated from history
+- **unpaid** — actual statement received; real due date and amount recorded
+- **paid** — payment confirmed; linked to ledger transaction
 
 ## Interactive Mode
 
@@ -71,7 +271,7 @@ fisk> show
   Bills (next 30 days)
   ────────────────────────────────────────────────────────
   Electric          $   142.50  due Jun 15  unpaid
-  Netflix           $    15.99  due Jul 01  unpaid
+  Netflix           $    15.99  due Jul 01  predicted
 
 fisk> show checkbook
      #  Date        Description                Debit      Credit      Balance  Status
@@ -90,8 +290,8 @@ checkbook> back
 fisk> bills bills
 bills> show
 bills> add
-bills> pay Electric
-bills> pay Netflix --add checkbook
+bills> receive Electric --due 2026-06-15 --amount 148.23
+bills> pay Electric --add checkbook
 bills> back
 
 fisk> quit
@@ -113,8 +313,10 @@ fisk> quit
 | `sort <name> <id> <position>` | Move a transaction to a position |
 | `summary <name> [--description] [--category] [--start-date] [--end-date]` | Transaction statistics and top-10 breakdowns |
 | `bills` | List bill files |
+| `bills create <name> [--path PATH]` | Create a new bill file |
 | `bills <file> [show]` | Show upcoming bills from a file |
 | `bills <file> pay <name> [--add <ledger>]` | Mark a bill as paid (optionally add transaction) |
+| `bills <file> receive <name> [--due DATE] [--amount AMT]` | Record a bill statement received |
 | `ledgers <name>` | Enter interactive mode for a ledger |
 | → `add` | Add a transaction |
 | → `bulk` | Add multiple transactions with the same date |
@@ -129,9 +331,10 @@ fisk> quit
 | → `sort <id> <pos>` | Move a transaction to a position (reassigns IDs) |
 | → `back` | Return to top-level |
 | `bills <file>` | Enter interactive mode for bills |
-| → `show` | Show upcoming bills with likely matches |
+| → `show` | Show upcoming bill instances |
 | → `add` | Add a recurring bill |
-| → `pay <name> [--add <ledger>]` | Mark a bill as paid |
+| → `receive <name> [--due DATE] [--amount AMT]` | Record a bill statement received |
+| → `pay <name> [--add <ledger>] [--date DATE]` | Mark a bill as paid |
 | → `edit <id>` | Edit a bill |
 | → `remove <id>` | Remove a bill |
 | → `back` | Return to top-level |
@@ -159,6 +362,19 @@ id,name,amount,category,frequency,due_day,start_date,end_date,paid_through
 4,Car Insurance,480.00,Auto,quarterly,1,2026-01-01,,2026-04-01
 5,Dog Grooming,65.00,Pets,42d,,2026-03-01,,2026-05-24
 ```
+
+### Instances CSV format
+
+Each bill file has a companion `*_instances.csv` that tracks individual occurrences:
+
+```csv
+id,bill_id,due_date,amount,paid_date,status,ledger,transaction_id
+1,1,2026-06-15,148.23,2026-06-14,paid,checkbook,47
+2,1,2026-07-16,,,predicted,,
+3,2,2026-07-01,15.99,,unpaid,,
+```
+
+Predicted instances are generated on the fly and not persisted. Only received (unpaid) and paid instances are stored.
 
 ### Frequency options
 

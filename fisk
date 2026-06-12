@@ -17,6 +17,7 @@ from pathlib import Path
 DEFAULT_DIR = Path.home() / "fisk"
 FIELDNAMES = ["id", "date", "description", "amount", "category", "status", "notes"]
 BILL_FIELDNAMES = ["id", "name", "amount", "category", "frequency", "due_day", "start_date", "end_date", "paid_through"]
+INSTANCE_FIELDNAMES = ["id", "bill_id", "due_date", "amount", "paid_date", "status", "ledger", "transaction_id"]
 
 
 def input_with_completion(prompt, options):
@@ -234,6 +235,112 @@ def write_bills(name, rows):
         w.writerows(rows)
 
 
+def instance_file_path(name):
+    """Path to the instances CSV for a bill file."""
+    bp = bill_file_path(name)
+    return bp.parent / f"{bp.stem}_instances.csv"
+
+
+def read_instances(name):
+    """Read instances for a bill file. Returns empty list if file doesn't exist."""
+    path = instance_file_path(name)
+    if not path.exists():
+        return []
+    with open(path, newline="") as f:
+        rows = list(csv.DictReader(f))
+        for r in rows:
+            for field in INSTANCE_FIELDNAMES:
+                if field not in r:
+                    r[field] = ""
+        return rows
+
+
+def write_instances(name, rows):
+    path = instance_file_path(name)
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=INSTANCE_FIELDNAMES)
+        w.writeheader()
+        w.writerows(rows)
+
+
+def next_instance_id(rows):
+    if not rows:
+        return 1
+    return max(int(r["id"]) for r in rows) + 1
+
+
+def generate_predicted_instances(name, window_days=90):
+    """Generate predicted instances for all bills in a file, merged with existing instances.
+    Returns combined list of existing + predicted instances within window."""
+    bills = read_bills(name)
+    if not bills:
+        return []
+    instances = read_instances(name)
+    today = date.today()
+    end = today + timedelta(days=window_days)
+
+    # Index existing instance dates per bill for fuzzy dedup
+    existing_dates = {}
+    for r in instances:
+        existing_dates.setdefault(r["bill_id"], []).append(date.fromisoformat(r["due_date"]))
+
+    predicted = []
+    for bill in bills:
+        if not bill["start_date"]:
+            continue
+        # Determine start: after latest instance or paid_through for this bill
+        bill_instances = [i for i in instances if i["bill_id"] == bill["id"]]
+        latest_date = None
+        for inst in bill_instances:
+            d = inst.get("due_date")
+            if d:
+                if latest_date is None or d > latest_date:
+                    latest_date = d
+        paid_through = date.fromisoformat(bill["paid_through"]) if bill["paid_through"] else None
+        if latest_date:
+            start = date.fromisoformat(latest_date) + timedelta(days=1)
+        elif paid_through:
+            start = paid_through + timedelta(days=1)
+        else:
+            start = date.fromisoformat(bill["start_date"])
+        # Clamp start to not generate ancient predictions
+        earliest = today - timedelta(days=window_days)
+        if start < earliest:
+            start = earliest
+        dates = generate_due_dates(bill, start, end)
+        amt, is_estimate = get_bill_amount(bill)
+        bill_existing = existing_dates.get(bill["id"], [])
+        for d in dates:
+            # Suppress if there's already a materialized instance within ±7 days
+            if any(abs((d - ed).days) <= 7 for ed in bill_existing):
+                continue
+            predicted.append({
+                "id": "",  # not persisted
+                "bill_id": bill["id"],
+                "due_date": d.isoformat(),
+                "amount": f"~{amt:.2f}" if amt and is_estimate else (str(amt) if amt else ""),
+                "paid_date": "",
+                "status": "predicted",
+                "ledger": "",
+                "transaction_id": "",
+                })
+    return instances + predicted
+
+
+def get_instance_for_bill(name, bill_id, due_date_str=None):
+    """Find the next actionable instance for a bill. If due_date_str given, find that specific one."""
+    instances = read_instances(name)
+    bill_instances = [i for i in instances if i["bill_id"] == bill_id]
+    if due_date_str:
+        return next((i for i in bill_instances if i["due_date"] == due_date_str), None)
+    # Find first non-paid instance
+    unpaid = [i for i in bill_instances if i["status"] in ("unpaid", "predicted")]
+    if unpaid:
+        unpaid.sort(key=lambda x: x["due_date"])
+        return unpaid[0]
+    return None
+
+
 def next_bill_id(rows):
     if not rows:
         return 1
@@ -321,28 +428,35 @@ def get_upcoming_bills(window_days=30):
         bills = read_bills(bf_name)
         if not bills:
             continue
-        for bill in bills:
-            if not bill["start_date"]:
+        bill_map = {b["id"]: b for b in bills}
+        all_instances = generate_predicted_instances(bf_name, window_days=window_days)
+        for inst in all_instances:
+            if inst["status"] == "paid":
                 continue
-            paid_through = date.fromisoformat(bill["paid_through"]) if bill["paid_through"] else None
-            start = paid_through + timedelta(days=1) if paid_through else date.fromisoformat(bill["start_date"])
-            # Clamp start to avoid showing ancient unpaid dates
-            earliest = today - timedelta(days=window_days)
-            if start < earliest:
-                start = earliest
-            # Show unpaid bills due up to end of window
-            dates = generate_due_dates(bill, start, end)
-            for d in dates:
-                status = "paid" if (paid_through and d <= paid_through) else "unpaid"
+            due = date.fromisoformat(inst["due_date"])
+            if due > end:
+                continue
+            bill = bill_map.get(inst["bill_id"])
+            if not bill:
+                continue
+            amt = None
+            is_estimate = False
+            if inst["amount"]:
+                if inst["amount"].startswith("~"):
+                    amt = Decimal(inst["amount"][1:])
+                    is_estimate = True
+                else:
+                    amt = Decimal(inst["amount"])
+            else:
                 amt, is_estimate = get_bill_amount(bill)
-                upcoming.append({
-                    "name": bill["name"],
-                    "amount": amt,
-                    "is_estimate": is_estimate,
-                    "due": d,
-                    "status": status,
-                    "source": bf_name,
-                })
+            upcoming.append({
+                "name": bill["name"],
+                "amount": amt,
+                "is_estimate": is_estimate,
+                "due": due,
+                "status": inst["status"],
+                "source": bf_name,
+            })
     upcoming.sort(key=lambda x: x["due"])
     _clear_ledger_cache()
     return upcoming
@@ -526,11 +640,11 @@ def show_dashboard(show_source=False):
     bill_files = list_bill_files()
     if bill_files:
         upcoming = get_upcoming_bills(30)
-        unpaid = [b for b in upcoming if b["status"] == "unpaid"]
-        if unpaid:
+        due_bills = [b for b in upcoming if b["status"] in ("unpaid", "predicted")]
+        if due_bills:
             print(f"\n  Bills (next 30 days)")
             print(f"  {'─'*56}")
-            for b in unpaid:
+            for b in due_bills:
                 due_str = b["due"].strftime("%b %d")
                 source_str = f"  [{b['source']}]" if show_source else ""
                 if b["amount"] is not None:
@@ -540,7 +654,7 @@ def show_dashboard(show_source=False):
                     print(f"  {b['name']:<18} {'':>11}  due {due_str:<8} {b['status']}{source_str}")
 
 
-def pay_bill(bill_file, bill_name, add_ledger=None):
+def pay_bill(bill_file, bill_name, add_ledger=None, paid_date=None):
     """Shared pay logic for both REPL and CLI. Returns True on success."""
     bills = read_bills(bill_file)
     if not bills:
@@ -549,23 +663,50 @@ def pay_bill(bill_file, bill_name, add_ledger=None):
     if not bill:
         print(f"  Bill '{bill_name}' not found.")
         return False
-    next_due = get_next_due(bill)
-    if not next_due:
-        print(f"  No upcoming due date for '{bill_name}'.")
-        return False
-    match = find_likely_match(bill, next_due)
-    if match:
-        print(f"  Likely match: {match}")
+    # Find the instance to pay (unpaid first, then predicted)
+    instances = read_instances(bill_file)
+    bill_insts = [i for i in instances if i["bill_id"] == bill["id"] and i["status"] == "unpaid"]
+    bill_insts.sort(key=lambda x: x["due_date"])
+    instance = bill_insts[0] if bill_insts else None
+    if not instance:
+        # No received instance — use next predicted due
+        next_due = get_next_due(bill)
+        if not next_due:
+            print(f"  No upcoming due date for '{bill_name}'.")
+            return False
     else:
-        print(f"  No matching transaction found.")
-    try:
-        confirm = input(f"  Mark paid through {next_due}? [Y/n] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print("\n  Cancelled.")
-        return False
-    if confirm and confirm != "y":
-        print("  Cancelled.")
-        return False
+        next_due = date.fromisoformat(instance["due_date"])
+    pay_d = paid_date or date.today().isoformat()
+    if not paid_date:
+        try:
+            pay_d = input(f"  Paid date [{date.today().isoformat()}]: ").strip() or date.today().isoformat()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
+            return False
+        if not validate_date(pay_d):
+            print("  Invalid date.")
+            return False
+        pay_d = parse_date_or_relative(pay_d).isoformat()
+    # Determine amount
+    if instance and instance["amount"] and not instance["amount"].startswith("~"):
+        amt = Decimal(instance["amount"])
+    else:
+        amt, is_estimate = get_bill_amount(bill)
+        if amt is None or (instance and instance["amount"].startswith("~")) or (not instance and is_estimate):
+            try:
+                default = f"~{amt:.2f}" if amt else ""
+                amt_input = input(f"  Amount [{default}]: ").strip()
+                if amt_input:
+                    amt = Decimal(amt_input)
+                elif amt is None:
+                    print("  Amount required.")
+                    return False
+            except (EOFError, KeyboardInterrupt, InvalidOperation):
+                print("\n  Cancelled.")
+                return False
+    # Ledger transaction
+    txn_id = ""
+    ledger_name = ""
     if add_ledger:
         ledger_rows = read_ledger(add_ledger)
         if ledger_rows is None:
@@ -573,45 +714,63 @@ def pay_bill(bill_file, bill_name, add_ledger=None):
             return False
         existing = find_matching_transaction(bill, next_due, add_ledger)
         if existing:
+            txn_id = existing["id"]
+            ledger_name = add_ledger
             for r in ledger_rows:
                 if r["id"] == existing["id"] and r["status"] == "future":
                     r["status"] = "pending"
+                    # Add back-reference in notes
+                    r["notes"] = f"bill:{bill_file}:{bill['id']}"
                     write_ledger(add_ledger, ledger_rows)
                     print(f"  ✓ {add_ledger} #{r['id']} marked pending")
                     break
             else:
+                # Update notes on existing match
+                for r in ledger_rows:
+                    if r["id"] == existing["id"]:
+                        if not r["notes"]:
+                            r["notes"] = f"bill:{bill_file}:{bill['id']}"
+                            write_ledger(add_ledger, ledger_rows)
+                        break
                 print(f"  ✓ Matched {add_ledger} #{existing['id']}")
         else:
-            amt, is_estimate = get_bill_amount(bill)
-            if amt is None:
-                try:
-                    amt_input = input("  Amount: ").strip()
-                    amt = Decimal(amt_input)
-                except (EOFError, KeyboardInterrupt, InvalidOperation):
-                    print("\n  Cancelled.")
-                    return False
-            elif is_estimate:
-                try:
-                    amt_input = input(f"  Amount [~{amt:.2f}]: ").strip()
-                    if amt_input:
-                        amt = Decimal(amt_input)
-                except (EOFError, KeyboardInterrupt, InvalidOperation):
-                    print("\n  Cancelled.")
-                    return False
+            new_id = str(next_id(ledger_rows))
             ledger_rows.append({
-                "id": str(next_id(ledger_rows)),
-                "date": date.today().isoformat(),
+                "id": new_id,
+                "date": pay_d,
                 "description": bill["name"],
                 "amount": str(-abs(amt)),
                 "category": bill["category"],
                 "status": "pending",
-                "notes": "",
+                "notes": f"bill:{bill_file}:{bill['id']}",
             })
             write_ledger(add_ledger, ledger_rows)
-            print(f"  ✓ Transaction added to {add_ledger} (#{ledger_rows[-1]['id']})")
+            txn_id = new_id
+            ledger_name = add_ledger
+            print(f"  ✓ Transaction added to {add_ledger} (#{new_id})")
+    # Create or update instance
+    if instance:
+        instance["amount"] = str(amt)
+        instance["paid_date"] = pay_d
+        instance["status"] = "paid"
+        instance["ledger"] = ledger_name
+        instance["transaction_id"] = txn_id
+    else:
+        instances.append({
+            "id": str(next_instance_id(instances)),
+            "bill_id": bill["id"],
+            "due_date": next_due.isoformat(),
+            "amount": str(amt),
+            "paid_date": pay_d,
+            "status": "paid",
+            "ledger": ledger_name,
+            "transaction_id": txn_id,
+        })
+    write_instances(bill_file, instances)
+    # Update paid_through on the bill
     bill["paid_through"] = next_due.isoformat()
     write_bills(bill_file, bills)
-    print(f"  ✓ {bill['name']} paid through {next_due}")
+    print(f"  ✓ {bill['name']} paid {pay_d} (due {next_due})")
     return True
 
 
@@ -1293,7 +1452,23 @@ class LedgerRepl(cmd.Cmd):
         print(f"  Amount:      {amt:.2f}")
         print(f"  Category:    {row['category'] or '—'}")
         print(f"  Status:      {row['status']}")
-        print(f"  Notes:       {row.get('notes', '') or '—'}")
+        notes = row.get("notes", "")
+        # Parse bill linkage from notes
+        m = re.match(r"^bill:([^:]+):(\d+)$", notes)
+        if m:
+            bf_name, bill_id = m.group(1), m.group(2)
+            bills = read_bills(bf_name)
+            bill = next((b for b in bills if b["id"] == bill_id), None) if bills else None
+            bill_label = f"{bf_name}/{bill['name']}" if bill else f"{bf_name}/#{bill_id}"
+            print(f"  Linked bill: {bill_label}")
+            # Find the instance
+            instances = read_instances(bf_name)
+            inst = next((i for i in instances if i["bill_id"] == bill_id and i["ledger"] == self.name and i["transaction_id"] == tid), None)
+            if inst:
+                print(f"  Due date:    {inst['due_date']}")
+                print(f"  Paid date:   {inst['paid_date']}")
+        else:
+            print(f"  Notes:       {notes or '—'}")
 
     def do_reconcile(self, line):
         """reconcile - walk through unreconciled transactions and verify balance"""
@@ -1446,34 +1621,44 @@ class BillsRepl(cmd.Cmd):
         self.prompt = f"{name}> "
 
     def do_show(self, line):
-        """show [--source] - show upcoming bills"""
-        parts = line.split()
-        show_source = "--source" in parts
+        """show - show upcoming bill instances (predicted/unpaid/paid)"""
         bills = read_bills(self.name)
         if not bills:
             print("  No bills.")
             return
+        all_instances = generate_predicted_instances(self.name)
+        if not all_instances:
+            print("  No upcoming bills.")
+            return
+        # Build bill name lookup
+        bill_map = {b["id"]: b for b in bills}
+        # Sort by due_date
+        all_instances.sort(key=lambda x: x["due_date"])
+        # Show only within 90 days
         today = date.today()
         end = today + timedelta(days=90)
-        print(f"  {'Bill':<18} {'Amount':>10}  {'Due':<10}  {'Status':<8}  {'Likely match'}")
-        print(f"  {'─'*18} {'─'*10}  {'─'*10}  {'─'*8}  {'─'*30}")
-        for bill in bills:
-            amt, is_estimate = get_bill_amount(bill)
+        shown = [i for i in all_instances if i["due_date"] <= end.isoformat() and i["status"] != "paid"]
+        # Also show recently paid (last 30 days)
+        recent_paid = [i for i in all_instances if i["status"] == "paid" and i["paid_date"] >= (today - timedelta(days=30)).isoformat()]
+        display = shown + recent_paid
+        display.sort(key=lambda x: x["due_date"])
+        if not display:
+            print("  No upcoming bills.")
+            return
+        print(f"  {'Bill':<18} {'Amount':>10}  {'Due':<10}  {'Status':<10}  {'Paid':<10}")
+        print(f"  {'─'*18} {'─'*10}  {'─'*10}  {'─'*10}  {'─'*10}")
+        for inst in display:
+            bill = bill_map.get(inst["bill_id"])
+            name = bill["name"] if bill else f"(bill {inst['bill_id']})"
             amt_str = ""
-            if amt is not None:
-                prefix = "~$" if is_estimate else " $"
-                amt_str = f"{prefix}{amt:>8,.2f}"
-            else:
-                amt_str = f" {'':>9}"
-            next_due = get_next_due(bill)
-            if not next_due or next_due > end:
-                status = "done" if bill["end_date"] and date.fromisoformat(bill["end_date"]) < today else "—"
-                print(f"  {bill['name']:<18} {amt_str}  {'—':<10}  {status:<8}")
-                continue
-            status = "unpaid"
-            match = find_likely_match(bill, next_due)
-            match_str = match or ""
-            print(f"  {bill['name']:<18} {amt_str}  {next_due.strftime('%b %d'):<10}  {status:<8}  {match_str}")
+            if inst["amount"]:
+                if inst["amount"].startswith("~"):
+                    amt_str = f"~${Decimal(inst['amount'][1:]):>8,.2f}"
+                else:
+                    amt_str = f" ${Decimal(inst['amount']):>8,.2f}"
+            due_str = date.fromisoformat(inst["due_date"]).strftime("%b %d")
+            paid_str = inst["paid_date"] if inst["paid_date"] else ""
+            print(f"  {name:<18} {amt_str:>10}  {due_str:<10}  {inst['status']:<10}  {paid_str:<10}")
 
     def do_add(self, line):
         """add - add a new recurring bill"""
@@ -1515,15 +1700,83 @@ class BillsRepl(cmd.Cmd):
         write_bills(self.name, bills)
         print("  Added.")
 
-    def do_pay(self, line):
-        """pay <name> [--add <ledger>] - mark a bill as paid"""
+    def do_receive(self, line):
+        """receive <name> [--due DATE] [--amount AMT] - record a bill statement received"""
         parts = line.split()
         if not parts:
-            print("Usage: pay <bill name> [--add <ledger>]")
+            print("Usage: receive <bill name> [--due DATE] [--amount AMT]")
             return
-        flags, positional = parse_flags(parts, {"--add": str})
+        flags, positional = parse_flags(parts, {"--due": str, "--amount": str})
         bill_name = " ".join(positional)
-        pay_bill(self.name, bill_name, add_ledger=flags.get("--add"))
+        bills = read_bills(self.name)
+        if not bills:
+            return
+        bill = next((b for b in bills if b["name"].lower() == bill_name.lower()), None)
+        if not bill:
+            print(f"  Bill '{bill_name}' not found.")
+            return
+        # Get or prompt for due date
+        due_str = flags.get("--due")
+        if not due_str:
+            next_due = get_next_due(bill)
+            default = next_due.isoformat() if next_due else ""
+            try:
+                due_str = input(f"  Due date [{default}]: ").strip() or default
+            except (EOFError, KeyboardInterrupt):
+                print("\n  Cancelled.")
+                return
+        if not due_str or not validate_date(due_str):
+            print("  Invalid date.")
+            return
+        due_str = parse_date_or_relative(due_str).isoformat()
+        # Get or prompt for amount
+        amt_str = flags.get("--amount")
+        if not amt_str:
+            est, is_estimate = get_bill_amount(bill)
+            default_amt = f"~{est:.2f}" if est and is_estimate else (f"{est:.2f}" if est else "")
+            try:
+                amt_str = input(f"  Amount [{default_amt}]: ").strip() or (str(est) if est else "")
+            except (EOFError, KeyboardInterrupt):
+                print("\n  Cancelled.")
+                return
+        if amt_str:
+            try:
+                Decimal(amt_str)
+            except InvalidOperation:
+                print("  Invalid amount.")
+                return
+        # Check if instance already exists for this due date
+        instances = read_instances(self.name)
+        existing = next((i for i in instances if i["bill_id"] == bill["id"] and i["due_date"] == due_str), None)
+        if existing:
+            if existing["status"] == "paid":
+                print(f"  Already paid on {existing['paid_date']}.")
+                return
+            existing["amount"] = amt_str
+            existing["status"] = "unpaid"
+        else:
+            instances.append({
+                "id": str(next_instance_id(instances)),
+                "bill_id": bill["id"],
+                "due_date": due_str,
+                "amount": amt_str,
+                "paid_date": "",
+                "status": "unpaid",
+                "ledger": "",
+                "transaction_id": "",
+            })
+        write_instances(self.name, instances)
+        print(f"  ✓ {bill['name']} due {due_str} — ${Decimal(amt_str):,.2f}" if amt_str else f"  ✓ {bill['name']} due {due_str}")
+
+    def do_pay(self, line):
+        """pay <name> [--add <ledger>] [--date DATE] - mark a bill as paid"""
+        parts = line.split()
+        if not parts:
+            print("Usage: pay <bill name> [--add <ledger>] [--date DATE]")
+            return
+        flags, positional = parse_flags(parts, {"--add": str, "--date": str})
+        bill_name = " ".join(positional)
+        pay_bill(self.name, bill_name, add_ledger=flags.get("--add"), paid_date=flags.get("--date"))
 
     def do_edit(self, line):
         """edit <id> - edit a bill"""
@@ -1869,7 +2122,47 @@ def cmd_bills(args):
         if not args.bill_name:
             print("Usage: fisk bills <file> pay <bill name> [--add <ledger>]")
             return
-        pay_bill(args.bill_file, args.bill_name, add_ledger=args.add_ledger)
+        pay_bill(args.bill_file, args.bill_name, add_ledger=args.add_ledger, paid_date=args.paid_date if hasattr(args, "paid_date") else None)
+
+    elif args.action == "receive":
+        if not args.bill_name:
+            print("Usage: fisk bills <file> receive <bill name> [--due DATE] [--amount AMT]")
+            return
+        bills = read_bills(args.bill_file)
+        if not bills:
+            return
+        bill = next((b for b in bills if b["name"].lower() == args.bill_name.lower()), None)
+        if not bill:
+            print(f"  Bill '{args.bill_name}' not found.")
+            return
+        due_str = args.due_date if hasattr(args, "due_date") and args.due_date else None
+        if not due_str:
+            next_due = get_next_due(bill)
+            due_str = next_due.isoformat() if next_due else None
+        if not due_str:
+            print("  Could not determine due date. Use --due.")
+            return
+        due_str = parse_date_or_relative(due_str).isoformat()
+        amt_str = args.receive_amount if hasattr(args, "receive_amount") and args.receive_amount else (bill["amount"] or "")
+        instances = read_instances(args.bill_file)
+        existing = next((i for i in instances if i["bill_id"] == bill["id"] and i["due_date"] == due_str), None)
+        if existing:
+            existing["amount"] = amt_str
+            existing["status"] = "unpaid"
+        else:
+            instances.append({
+                "id": str(next_instance_id(instances)),
+                "bill_id": bill["id"],
+                "due_date": due_str,
+                "amount": amt_str,
+                "paid_date": "",
+                "status": "unpaid",
+                "ledger": "",
+                "transaction_id": "",
+            })
+        write_instances(args.bill_file, instances)
+        amt_display = f" — ${Decimal(amt_str):,.2f}" if amt_str else ""
+        print(f"  ✓ {bill['name']} due {due_str}{amt_display}")
 
 
 def build_parser():
@@ -1946,11 +2239,14 @@ def build_parser():
 
     p = sub.add_parser("bills", help="Manage recurring bills")
     p.add_argument("bill_file", nargs="?", help="Bill file name")
-    p.add_argument("action", nargs="?", help="Action: show, pay, or create")
-    p.add_argument("bill_name", nargs="?", help="Bill name (for pay) or file name (for create)")
+    p.add_argument("action", nargs="?", help="Action: show, pay, receive, or create")
+    p.add_argument("bill_name", nargs="?", help="Bill name (for pay/receive) or file name (for create)")
     p.add_argument("--add", dest="add_ledger", help="Also add transaction to this ledger (for pay)")
     p.add_argument("--source", action="store_true", help="Show source file for each bill")
     p.add_argument("--path", dest="bill_path", help="Path for the bills CSV file (for create)")
+    p.add_argument("--due", dest="due_date", help="Due date for receive")
+    p.add_argument("--amount", dest="receive_amount", help="Amount for receive")
+    p.add_argument("--date", dest="paid_date", help="Payment date for pay (default: today)")
 
     return parser
 
