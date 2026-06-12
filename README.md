@@ -319,6 +319,8 @@ fisk> quit
 | `bills <file> receive <name> [--due DATE] [--amount AMT]` | Record a bill statement received |
 | `ledgers <name>` | Enter interactive mode for a ledger |
 | → `add` | Add a transaction |
+| → `debit` | Add a debit (expense) — amount stored as negative |
+| → `credit` | Add a credit (income) — amount stored as positive |
 | → `bulk` | Add multiple transactions with the same date |
 | → `edit <id>` | Edit a transaction |
 | → `delete <id>` | Remove a transaction (with confirmation) |
@@ -407,7 +409,8 @@ The top-level `show` aggregates upcoming bills across all files. Use `--source` 
 
 ## Date Formats
 
-Dates accept `YYYY-MM-DD`, `today`, or relative durations:
+Dates accept `YYYY-MM-DD`, `today`, a bare day number, or relative durations:
+- `12` — the 12th of the current month
 - `+7d` — 7 days from today
 - `+2w` — 2 weeks from today
 - `+3m` — 3 months from today
@@ -502,6 +505,7 @@ subscriptions   ~/finances/subscriptions.csv
 [defaults]
 --sort desc
 --limit 20
+--default-sign debit
 ```
 
 Ledgers not mapped in config are stored in `~/fisk/` by default. Override with the `FISK_DIR` environment variable.
