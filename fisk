@@ -1876,8 +1876,9 @@ class BillsRepl(cmd.Cmd):
                 if other_bills and any(b["name"].lower() == name.lower() for b in other_bills):
                     print(f"  ⚠ '{name}' also exists in [{bf}]")
                     break
-            amount = input("  Amount: ").strip()
-            Decimal(amount)
+            amount = input("  Amount (blank if variable): ").strip()
+            if amount:
+                Decimal(amount)
             category = input("  Category []: ").strip()
             print("  Frequency (monthly, bimonthly, quarterly, semiannual, annual, or Nd e.g. 14d):")
             frequency = input("  Frequency: ").strip()
