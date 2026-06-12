@@ -389,15 +389,16 @@ def generate_due_dates(bill, start, end):
     due_day = int(bill["due_day"]) if bill["due_day"] else None
 
     dates = []
-    # Interval-based frequencies (e.g. "14d", "30d")
-    m = re.match(r"^(\d+)d$", freq)
+    # Interval-based frequencies (e.g. "14d", "30d", "2w")
+    m = re.match(r"^(\d+)([dw])$", freq)
     if m:
-        interval = int(m.group(1))
+        n, unit = int(m.group(1)), m.group(2)
+        interval = timedelta(days=n) if unit == "d" else timedelta(weeks=n)
         current = start_date
         while current <= end:
             if current >= start and (not end_date or current <= end_date):
                 dates.append(current)
-            current += timedelta(days=interval)
+            current += interval
         return dates
 
     # Calendar-based frequencies
