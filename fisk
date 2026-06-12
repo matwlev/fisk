@@ -1082,158 +1082,146 @@ class FiskRepl(cmd.Cmd):
 
     def __init__(self):
         super().__init__()
-        self._last_show = None  # stores params for pagination
 
     def do_show(self, line):
-        """show [ledger] [--start-date DATE] [--end-date DATE] [--status STATUS] [--source]"""
-        parts = line.split()
-        if not parts:
-            show_dashboard()
-            return
-        if parts[0] == "next":
-            self.do_next(" ".join(parts[1:]))
-            return
-        name = parts[0]
-        rows = read_ledger(name)
-        if rows is None:
-            return
-        # Parse inline flags
-        defaults = get_default_flags()
-        spec = {"--start-date": str, "--end-date": str, "--status": str, "--sort": str, "--limit": int, "--amount": str}
-        flags, _ = parse_flags(parts[1:], spec)
-        start = parse_date_or_relative(flags["--start-date"]) if "--start-date" in flags else None
-        end = parse_date_or_relative(flags["--end-date"]) if "--end-date" in flags else date.today()
-        status = flags.get("--status")
-        sort_order = flags.get("--sort", defaults.get("--sort", "desc"))
-        limit = flags.get("--limit", int(defaults["--limit"]) if "--limit" in defaults else None)
-        amount_filter = parse_amount_filter(flags["--amount"]) if "--amount" in flags else None
-        effective_limit = limit if limit is not None else 20
-        self._last_show = {
-            "name": name, "start": start, "end": end, "status": status,
-            "sort_order": sort_order, "limit": effective_limit, "amount_filter": amount_filter,
-            "offset": effective_limit,
-        }
-        format_table(rows, include_future=False, start_date=start, end_date=end, status_filter=status, sort_order=sort_order, limit=limit, amount_filter=amount_filter)
-
-    def do_next(self, line):
-        """show next [--limit N] - show the next page of transactions"""
-        if not self._last_show:
-            print("  No previous show command. Run 'show <ledger>' first.")
-            return
-        flags, _ = parse_flags(line.split(), {"--limit": int})
-        limit = flags.get("--limit", self._last_show["limit"])
-        p = self._last_show
-        rows = read_ledger(p["name"])
-        if rows is None:
-            return
-        format_table(rows, include_future=False, start_date=p["start"], end_date=p["end"],
-                     status_filter=p["status"], sort_order=p["sort_order"], limit=limit,
-                     amount_filter=p["amount_filter"], offset=p["offset"])
-        p["offset"] += limit
-
-    def do_forecast(self, line):
-        """forecast <ledger> [-d DATE|DURATION]"""
-        parts = line.split()
-        if not parts:
-            print("Usage: forecast <ledger> [-d DATE|DURATION]")
-            return
-        name = parts[0]
-        rows = read_ledger(name)
-        if rows is None:
-            return
-        defaults = get_default_flags()
-        spec = {"-d": str, "--start-date": str, "--sort": str, "--limit": int, "--amount": str}
-        flags, _ = parse_flags(parts[1:], spec)
-        end = parse_date_or_relative(flags["-d"]) if "-d" in flags else date.today() + timedelta(days=30)
-        start = parse_date_or_relative(flags["--start-date"]) if "--start-date" in flags else None
-        sort_order = flags.get("--sort", defaults.get("--sort", "desc"))
-        limit = flags.get("--limit", int(defaults["--limit"]) if "--limit" in defaults else None)
-        amount_filter = parse_amount_filter(flags["--amount"]) if "--amount" in flags else None
-        format_table(rows, include_future=True, start_date=start, end_date=end, sort_order=sort_order, limit=limit, amount_filter=amount_filter)
-
-    def do_create(self, line):
-        """create ledger <name> [--balance AMT] [--path PATH] | create bills <name> [--path PATH]"""
-        parts = line.split()
-        if len(parts) < 2 or parts[0] not in ("ledger", "bills"):
-            print("Usage: create ledger <name> [--balance AMOUNT] [--path PATH]")
-            print("       create bills <name> [--path PATH]")
-            return
-        kind = parts[0]
-        name = parts[1]
-        spec = {"--balance": str, "--path": str, "--config": str}
-        flags, _ = parse_flags(parts[2:], spec)
-        csv_path = flags.get("--path")
-        if kind == "ledger":
-            balance = flags.get("--balance", "0.00")
-            cfg_file = flags.get("--config")
-            if csv_path:
-                path = Path(csv_path).expanduser()
-                path.parent.mkdir(parents=True, exist_ok=True)
-            else:
-                path = ledger_path(name)
-            if path.exists():
-                print(f"Ledger '{name}' already exists at {path}.")
-                return
-            rows = [{
-                "id": "1",
-                "date": date.today().isoformat(),
-                "description": "Opening balance",
-                "amount": balance,
-                "category": "",
-                "status": "starting",
-                "notes": "",
-            }]
-            with open(path, "w", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=FIELDNAMES)
-                w.writeheader()
-                w.writerows(rows)
-            add_ledger_to_config(name, str(path), config_file=cfg_file)
-            print(f"Created: {path}")
-        elif kind == "bills":
-            if csv_path:
-                path = Path(csv_path).expanduser()
-                path.parent.mkdir(parents=True, exist_ok=True)
-            else:
-                path = get_ledger_dir() / f"{name}.csv"
-            if path.exists():
-                print(f"Bill file '{name}' already exists at {path}.")
-                return
-            with open(path, "w", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=BILL_FIELDNAMES)
-                w.writeheader()
-            add_bills_to_config(name, str(path))
-            print(f"Created: {path}")
-
-    def do_use(self, line):
-        """use <ledger> - enter interactive mode for a ledger (alias for 'ledgers')"""
-        self.do_ledgers(line)
+        """show - dashboard overview of ledgers and upcoming bills"""
+        show_dashboard()
 
     def do_ledgers(self, line):
-        """ledgers <name> - enter interactive mode for a ledger"""
+        """ledgers - enter ledger management mode"""
+        LedgersRepl().cmdloop()
+
+    def do_bills(self, line):
+        """bills - enter bills management mode"""
+        BillsListRepl().cmdloop()
+
+    def do_quit(self, line):
+        """Exit fisk"""
+        return True
+
+    def do_exit(self, line):
+        """Exit fisk"""
+        return True
+
+    do_EOF = do_quit
+
+
+class LedgersRepl(cmd.Cmd):
+    prompt = "fisk (ledgers)> "
+
+    def do_show(self, line):
+        """show - list all ledgers"""
+        ledgers = list_ledgers()
+        if not ledgers:
+            print("  No ledgers. Use 'new' to create one.")
+        else:
+            for l in ledgers:
+                print(f"  {l}")
+
+    def do_new(self, line):
+        """new - create a new ledger interactively"""
+        try:
+            name = input("  Name: ").strip()
+            if not name:
+                print("  Cancelled.")
+                return
+            balance = input("  Opening balance [0.00]: ").strip() or "0.00"
+            default_path = str(ledger_path(name))
+            csv_path = input(f"  Path [{default_path}]: ").strip() or default_path
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
+            return
+        try:
+            Decimal(balance)
+        except InvalidOperation:
+            print("  Invalid balance.")
+            return
+        path = Path(csv_path).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            print(f"  Ledger '{name}' already exists at {path}.")
+            return
+        rows = [{
+            "id": "1",
+            "date": date.today().isoformat(),
+            "description": "Opening balance",
+            "amount": balance,
+            "category": "",
+            "status": "starting",
+            "notes": "",
+        }]
+        with open(path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=FIELDNAMES)
+            w.writeheader()
+            w.writerows(rows)
+        add_ledger_to_config(name, str(path))
+        print(f"  Created: {path}")
+
+    def do_use(self, line):
+        """use <name> - enter a ledger"""
         name = line.strip()
         if not name:
-            for l in list_ledgers():
-                print(f"  {l}")
+            print("Usage: use <name>")
             return
         if not ledger_path(name).exists():
-            print(f"Ledger '{name}' not found.")
+            print(f"  Ledger '{name}' not found.")
             return
         LedgerRepl(name).cmdloop()
 
-    def do_bills(self, line):
-        """bills [name] - list bill files or enter bills mode"""
-        parts = line.split()
-        if not parts:
-            bill_files = list_bill_files()
-            if not bill_files:
-                print("  No bill files configured. Use 'create bills <name>' to create one.")
-            else:
-                for b in bill_files:
-                    print(f"  {b}")
+    def do_back(self, line):
+        """Return to top level"""
+        return True
+
+    def do_quit(self, line):
+        """Exit fisk"""
+        sys.exit(0)
+
+    do_EOF = do_back
+
+
+class BillsListRepl(cmd.Cmd):
+    prompt = "fisk (bills)> "
+
+    def do_show(self, line):
+        """show - list all bill files"""
+        bill_files = list_bill_files()
+        if not bill_files:
+            print("  No bill files. Use 'new' to create one.")
+        else:
+            for b in bill_files:
+                print(f"  {b}")
+
+    def do_new(self, line):
+        """new - create a new bill file interactively"""
+        try:
+            name = input("  Name: ").strip()
+            if not name:
+                print("  Cancelled.")
+                return
+            default_path = str(get_ledger_dir() / f"{name}.csv")
+            csv_path = input(f"  Path [{default_path}]: ").strip() or default_path
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
             return
-        name = parts[0]
+        path = Path(csv_path).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            print(f"  Bill file '{name}' already exists at {path}.")
+            return
+        with open(path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=BILL_FIELDNAMES)
+            w.writeheader()
+        add_bills_to_config(name, str(path))
+        print(f"  Created: {path}")
+
+    def do_use(self, line):
+        """use <name> - enter a bill file"""
+        name = line.strip()
+        if not name:
+            print("Usage: use <name>")
+            return
         if not bill_file_path(name).exists():
-            print(f"Bill file '{name}' not found.")
+            print(f"  Bill file '{name}' not found.")
             return
         BillsRepl(name).cmdloop()
 
@@ -1252,7 +1240,7 @@ class FiskRepl(cmd.Cmd):
         pay_bill(bf_name, bill["name"], add_ledger=flags.get("--add"), paid_date=flags.get("--date"))
 
     def do_receive(self, line):
-        """receive <bill name> [--due DATE] [--amount AMT] - record a bill received (auto-resolves file)"""
+        """receive <bill name> [--due DATE] [--amount AMT] - record a bill received"""
         parts = line.split()
         if not parts:
             print("Usage: receive <bill name> [--due DATE] [--amount AMT]")
@@ -1263,7 +1251,6 @@ class FiskRepl(cmd.Cmd):
         if not result:
             return
         bf_name, bill = result
-        # Get or prompt for due date
         due_str = flags.get("--due")
         if not due_str:
             next_due = get_next_due(bill)
@@ -1277,7 +1264,6 @@ class FiskRepl(cmd.Cmd):
             print("  Invalid date.")
             return
         due_str = parse_date_or_relative(due_str).isoformat()
-        # Get or prompt for amount
         amt_str = flags.get("--amount")
         if not amt_str:
             est, is_estimate = get_bill_amount(bill)
@@ -1315,15 +1301,15 @@ class FiskRepl(cmd.Cmd):
         write_instances(bf_name, instances)
         print(f"  ✓ {bill['name']} due {due_str} — ${Decimal(amt_str):,.2f}" if amt_str else f"  ✓ {bill['name']} due {due_str}")
 
+    def do_back(self, line):
+        """Return to top level"""
+        return True
+
     def do_quit(self, line):
         """Exit fisk"""
-        return True
+        sys.exit(0)
 
-    def do_exit(self, line):
-        """Exit fisk"""
-        return True
-
-    do_EOF = do_quit
+    do_EOF = do_back
 
 
 class LedgerRepl(cmd.Cmd):
@@ -2378,7 +2364,7 @@ def build_parser():
 
     p = sub.add_parser("create", help="Create a new ledger or bill file")
     p.add_argument("kind", choices=["ledger", "bills"], help="What to create: ledger or bills")
-    p.add_argument("name", help="Name")
+    p.add_argument("--name", required=True, help="Name")
     p.add_argument("--balance", default="0.00", help="Starting balance (ledger only, default: 0.00)")
     p.add_argument("--path", help="Path for the CSV file")
     p.add_argument("--config", dest="config_file", help="Config file to register in")
