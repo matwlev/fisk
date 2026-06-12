@@ -1419,6 +1419,53 @@ class LedgerRepl(cmd.Cmd):
         write_ledger(self.name, rows)
         print("  Added.")
 
+    def _add_with_sign(self, sign):
+        """Add a transaction with forced sign (negative for debit, positive for credit)."""
+        rows = read_ledger(self.name)
+        if rows is None:
+            return
+        descriptions = sorted(set(r["description"] for r in rows if r["status"] != "starting"))
+        categories = sorted(set(r["category"] for r in rows if r["category"]))
+        try:
+            d = input(f"  Date [{date.today().isoformat()}]: ").strip() or date.today().isoformat()
+            if not validate_date(d):
+                print("  Invalid date. Use YYYY-MM-DD, 'today', or +Nd/+Nw/+Nm.")
+                return
+            d = parse_date_or_relative(d).isoformat()
+            desc = input_with_completion("  Description: ", descriptions).strip()
+            amt = input("  Amount: ").strip()
+            cat = input_with_completion("  Category []: ", categories).strip()
+            notes = input("  Notes []: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
+            return
+        try:
+            val = Decimal(amt.lstrip("+-"))
+        except InvalidOperation:
+            print("  Invalid amount.")
+            return
+        final = -abs(val) if sign == "debit" else abs(val)
+        status = "future" if date.fromisoformat(d) > date.today() else "pending"
+        rows.append({
+            "id": str(next_id(rows)),
+            "date": d,
+            "description": desc,
+            "amount": str(final),
+            "category": cat,
+            "status": status,
+            "notes": notes,
+        })
+        write_ledger(self.name, rows)
+        print(f"  Added.  ({final})")
+
+    def do_debit(self, line):
+        """debit - add a debit (expense) transaction"""
+        self._add_with_sign("debit")
+
+    def do_credit(self, line):
+        """credit - add a credit (income) transaction"""
+        self._add_with_sign("credit")
+
     def do_bulk(self, line):
         """bulk - add multiple transactions with the same date"""
         rows = read_ledger(self.name)
