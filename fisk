@@ -937,33 +937,47 @@ def format_table(rows, include_future=False, start_date=None, end_date=None, sta
 
 def cmd_create(args):
     name = args.name
-    # Determine CSV path
-    if hasattr(args, "path") and args.path:
-        path = Path(args.path).expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
-    else:
-        path = ledger_path(name)
-    if path.exists():
-        print(f"Ledger '{name}' already exists at {path}.")
-        return
-    balance = args.balance if args.balance else "0.00"
-    rows = [{
-        "id": "1",
-        "date": date.today().isoformat(),
-        "description": "Opening balance",
-        "amount": balance,
-        "category": "",
-        "status": "starting",
-        "notes": "",
-    }]
-    with open(path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDNAMES)
-        w.writeheader()
-        w.writerows(rows)
-    # Register in config
-    config_file = Path(args.config_file) if hasattr(args, "config_file") and args.config_file else None
-    add_ledger_to_config(name, str(path), config_file=config_file)
-    print(f"Created: {path}")
+    csv_path = args.path if hasattr(args, "path") and args.path else None
+    if args.kind == "ledger":
+        if csv_path:
+            path = Path(csv_path).expanduser()
+            path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            path = ledger_path(name)
+        if path.exists():
+            print(f"Ledger '{name}' already exists at {path}.")
+            return
+        balance = args.balance if args.balance else "0.00"
+        rows = [{
+            "id": "1",
+            "date": date.today().isoformat(),
+            "description": "Opening balance",
+            "amount": balance,
+            "category": "",
+            "status": "starting",
+            "notes": "",
+        }]
+        with open(path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=FIELDNAMES)
+            w.writeheader()
+            w.writerows(rows)
+        config_file = Path(args.config_file) if hasattr(args, "config_file") and args.config_file else None
+        add_ledger_to_config(name, str(path), config_file=config_file)
+        print(f"Created: {path}")
+    elif args.kind == "bills":
+        if csv_path:
+            path = Path(csv_path).expanduser()
+            path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            path = get_ledger_dir() / f"{name}.csv"
+        if path.exists():
+            print(f"Bill file '{name}' already exists at {path}.")
+            return
+        with open(path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=BILL_FIELDNAMES)
+            w.writeheader()
+        add_bills_to_config(name, str(path))
+        print(f"Created: {path}")
 
 
 def cmd_show(args):
@@ -1138,40 +1152,57 @@ class FiskRepl(cmd.Cmd):
         format_table(rows, include_future=True, start_date=start, end_date=end, sort_order=sort_order, limit=limit, amount_filter=amount_filter)
 
     def do_create(self, line):
-        """create <name> [--balance AMOUNT] [--path PATH] [--config FILE]"""
+        """create ledger <name> [--balance AMT] [--path PATH] | create bills <name> [--path PATH]"""
         parts = line.split()
-        if not parts:
-            print("Usage: create <name> [--balance AMOUNT] [--path PATH] [--config FILE]")
+        if len(parts) < 2 or parts[0] not in ("ledger", "bills"):
+            print("Usage: create ledger <name> [--balance AMOUNT] [--path PATH]")
+            print("       create bills <name> [--path PATH]")
             return
-        name = parts[0]
+        kind = parts[0]
+        name = parts[1]
         spec = {"--balance": str, "--path": str, "--config": str}
-        flags, _ = parse_flags(parts[1:], spec)
-        balance = flags.get("--balance", "0.00")
+        flags, _ = parse_flags(parts[2:], spec)
         csv_path = flags.get("--path")
-        cfg_file = flags.get("--config")
-        if csv_path:
-            path = Path(csv_path).expanduser()
-            path.parent.mkdir(parents=True, exist_ok=True)
-        else:
-            path = ledger_path(name)
-        if path.exists():
-            print(f"Ledger '{name}' already exists at {path}.")
-            return
-        rows = [{
-            "id": "1",
-            "date": date.today().isoformat(),
-            "description": "Opening balance",
-            "amount": balance,
-            "category": "",
-            "status": "starting",
-            "notes": "",
-        }]
-        with open(path, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=FIELDNAMES)
-            w.writeheader()
-            w.writerows(rows)
-        add_ledger_to_config(name, str(path), config_file=cfg_file)
-        print(f"Created: {path}")
+        if kind == "ledger":
+            balance = flags.get("--balance", "0.00")
+            cfg_file = flags.get("--config")
+            if csv_path:
+                path = Path(csv_path).expanduser()
+                path.parent.mkdir(parents=True, exist_ok=True)
+            else:
+                path = ledger_path(name)
+            if path.exists():
+                print(f"Ledger '{name}' already exists at {path}.")
+                return
+            rows = [{
+                "id": "1",
+                "date": date.today().isoformat(),
+                "description": "Opening balance",
+                "amount": balance,
+                "category": "",
+                "status": "starting",
+                "notes": "",
+            }]
+            with open(path, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=FIELDNAMES)
+                w.writeheader()
+                w.writerows(rows)
+            add_ledger_to_config(name, str(path), config_file=cfg_file)
+            print(f"Created: {path}")
+        elif kind == "bills":
+            if csv_path:
+                path = Path(csv_path).expanduser()
+                path.parent.mkdir(parents=True, exist_ok=True)
+            else:
+                path = get_ledger_dir() / f"{name}.csv"
+            if path.exists():
+                print(f"Bill file '{name}' already exists at {path}.")
+                return
+            with open(path, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=BILL_FIELDNAMES)
+                w.writeheader()
+            add_bills_to_config(name, str(path))
+            print(f"Created: {path}")
 
     def do_use(self, line):
         """use <ledger> - enter interactive mode for a ledger (alias for 'ledgers')"""
@@ -1190,36 +1221,15 @@ class FiskRepl(cmd.Cmd):
         LedgerRepl(name).cmdloop()
 
     def do_bills(self, line):
-        """bills [name] [--source] - enter bills context or show upcoming"""
+        """bills [name] - list bill files or enter bills mode"""
         parts = line.split()
         if not parts:
             bill_files = list_bill_files()
             if not bill_files:
-                print("  No bill files configured. Add a [bills] section to config.")
+                print("  No bill files configured. Use 'create bills <name>' to create one.")
             else:
                 for b in bill_files:
                     print(f"  {b}")
-            return
-        if parts[0] == "create":
-            # bills create <name> [--path PATH]
-            if len(parts) < 2:
-                print("Usage: bills create <name> [--path PATH]")
-                return
-            name = parts[1]
-            flags, _ = parse_flags(parts[2:], {"--path": str})
-            if "--path" in flags:
-                path = Path(flags["--path"]).expanduser()
-                path.parent.mkdir(parents=True, exist_ok=True)
-            else:
-                path = get_ledger_dir() / f"{name}.csv"
-            if path.exists():
-                print(f"Bill file '{name}' already exists at {path}.")
-                return
-            with open(path, "w", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=BILL_FIELDNAMES)
-                w.writeheader()
-            add_bills_to_config(name, str(path))
-            print(f"Created: {path}")
             return
         name = parts[0]
         if not bill_file_path(name).exists():
@@ -1320,7 +1330,7 @@ class LedgerRepl(cmd.Cmd):
     def __init__(self, name):
         super().__init__()
         self.name = name
-        self.prompt = f"{name}> "
+        self.prompt = f"fisk (ledger: {name}) > "
         self._last_show = None
 
     def do_show(self, line):
@@ -1818,7 +1828,7 @@ class BillsRepl(cmd.Cmd):
     def __init__(self, name):
         super().__init__()
         self.name = name
-        self.prompt = f"{name}> "
+        self.prompt = f"fisk (bills: {name}) > "
 
     def do_show(self, line):
         """show - show upcoming bill instances (predicted/unpaid/paid)"""
@@ -2282,25 +2292,9 @@ def cmd_bills(args):
                 print(f"  {b}")
         return
 
-    # Handle: fisk bills create <name> [--path PATH]
+    # Redirect old 'bills create' to new syntax
     if args.bill_file == "create":
-        name = args.action  # positional shift: 'create' ate bill_file, name lands in action
-        if not name:
-            print("Usage: fisk bills create <name> [--path PATH]")
-            return
-        if args.bill_path:
-            path = Path(args.bill_path).expanduser()
-            path.parent.mkdir(parents=True, exist_ok=True)
-        else:
-            path = get_ledger_dir() / f"{name}.csv"
-        if path.exists():
-            print(f"Bill file '{name}' already exists at {path}.")
-            return
-        with open(path, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=BILL_FIELDNAMES)
-            w.writeheader()
-        add_bills_to_config(name, str(path))
-        print(f"Created: {path}")
+        print("Use: fisk create bills <name> [--path PATH]")
         return
 
     if not args.action or args.action == "show":
@@ -2382,11 +2376,12 @@ def build_parser():
     parser.add_argument("--version", action="version", version=f"fisk {VERSION}")
     sub = parser.add_subparsers(dest="command")
 
-    p = sub.add_parser("create", help="Create a new ledger")
-    p.add_argument("name", help="Ledger name")
-    p.add_argument("--balance", default="0.00", help="Starting balance (default: 0.00)")
+    p = sub.add_parser("create", help="Create a new ledger or bill file")
+    p.add_argument("kind", choices=["ledger", "bills"], help="What to create: ledger or bills")
+    p.add_argument("name", help="Name")
+    p.add_argument("--balance", default="0.00", help="Starting balance (ledger only, default: 0.00)")
     p.add_argument("--path", help="Path for the CSV file")
-    p.add_argument("--config", dest="config_file", help="Config file to register the ledger in")
+    p.add_argument("--config", dest="config_file", help="Config file to register in")
 
     p = sub.add_parser("show", help="List ledgers or display a ledger")
     p.add_argument("ledger", nargs="?", help="Ledger to display (omit to list all)")
